@@ -10,7 +10,7 @@
 
 A lightweight CLI for spinning up isolated git worktrees paired with tmux sessions, purpose-built for running parallel [Claude Code](https://code.claude.com/docs) or [Codex](https://openai.com/codex/) sessions on macOS.
 
-Each `muxtree new` call gives you a fresh branch in its own directory with your config files copied in and a tmux session with two windows ready to go — one for viewing code and running your app, one for your AI coding agent. Switch between them with `Ctrl-b n` / `Ctrl-b p`.
+Each `muxtree new` call gives you a fresh branch in its own directory with your config files copied in, setup commands run, and a tmux session with two windows ready to go — one for viewing code and running your app, one for your AI coding agent. Switch between them with `Ctrl-b n` / `Ctrl-b p`.
 
 ---
 
@@ -69,7 +69,7 @@ muxtree new feature-auth
 #    Switch windows with Ctrl-b n / Ctrl-b p
 ```
 
-That's it. You're working in an isolated branch with your `.env` and config files already copied over.
+That's it. You're working in an isolated branch with your `.env` and config files already copied over and setup commands already running.
 
 ---
 
@@ -86,7 +86,9 @@ That's it. You're working in an isolated branch with your `.env` and config file
   │  │                                                          │
   │  │  2. Copy config files (.env, CLAUDE.md, etc.)            │
   │  │                                                          │
-  │  │  3. Create tmux session: my-app_feature-auth             │
+  │  │  3. Run setup commands (npm install, etc.)               │
+  │  │                                                          │
+  │  │  4. Create tmux session: my-app_feature-auth             │
   │  │     ┌─────────────┐  ┌─────────────┐                    │
   │  │     │  dev window  │  │ agent window│                    │
   │  │     │  (run app,   │  │ (claude is  │                    │
@@ -94,7 +96,7 @@ That's it. You're working in an isolated branch with your `.env` and config file
   │  │     └─────────────┘  └─────────────┘                    │
   │  │     Ctrl-b n / Ctrl-b p to switch                        │
   │  │                                                          │
-  │  │  4. Open terminal window attached to session             │
+  │  │  5. Open terminal window attached to session             │
   │  └──────────────────────────────────────────────────────────┘
   │
   │  muxtree new fix-bug
@@ -117,18 +119,20 @@ Interactive setup. Creates `~/.muxtree/config` where you specify:
 - **Worktree base directory** — where all worktrees live (e.g. `~/worktrees`)
 - **Terminal app** — `terminal` (Terminal.app) or `iterm2`
 - **Files to copy** — comma-separated list of files to copy from your repo root into each new worktree (e.g. `.env,.env.local,CLAUDE.md`)
+- **Setup commands** — comma-separated list of commands to run in the dev window when a new worktree is created (e.g. `npm install,npm run build`)
 
 ```bash
 $ muxtree init
 Worktree base directory [~/worktrees]: ~/worktrees
 Terminal app (terminal/iterm2) [terminal]: iterm2
 Files to copy: .env,.env.local,.claude/settings.json
+Setup commands: npm install,npm run build
 ✓ Config written to ~/.muxtree/config
 ```
 
 ### `muxtree new <branch> [options]`
 
-Creates a worktree, copies config files, and launches a tmux session with two windows (dev + agent) in a new terminal.
+Creates a worktree, copies config files, runs setup commands, and launches a tmux session with two windows (dev + agent) in a new terminal.
 
 ```bash
 # Branch from main (auto-detected)
@@ -152,7 +156,8 @@ muxtree new fix-bug --bg
 1. `git worktree add -b <branch>` at `<worktree_dir>/<repo>/<branch>/`
 2. Copies each file from `copy_files` config into the new worktree
 3. Creates a detached tmux session with two windows (dev + agent)
-4. Opens the session in a new terminal window
+4. Runs `setup_commands` in the dev window (chained with `&&`)
+5. Opens the session in a new terminal window
 
 ### `muxtree list`
 
@@ -249,6 +254,10 @@ terminal=iterm2
 # Files to copy from repo root into new worktrees (comma-separated)
 # Supports glob patterns
 copy_files=.env,.env.local,CLAUDE.md,.claude/settings.json
+
+# Commands to run in the dev window when a new worktree is created (comma-separated)
+# Chained with && so execution stops on first failure
+setup_commands=npm install,npm run build
 ```
 
 ### Config options
@@ -258,10 +267,11 @@ copy_files=.env,.env.local,CLAUDE.md,.claude/settings.json
 | `worktree_dir` | `~/worktrees` | Base directory where worktrees are created. Organized as `<worktree_dir>/<repo>/<branch>/` |
 | `terminal` | `terminal` | Which terminal app to open: `terminal` (Terminal.app) or `iterm2` |
 | `copy_files` | *(empty)* | Comma-separated list of files/globs to copy from repo root into new worktrees |
+| `setup_commands` | *(empty)* | Comma-separated list of commands to run in the dev window on worktree creation. Chained with `&&` |
 
 ### Project-local config
 
-You can create a `.muxtree` file in your repo root to override global settings on a per-project basis. This is useful for setting project-specific `copy_files`.
+You can create a `.muxtree` file in your repo root to override global settings on a per-project basis. This is useful for setting project-specific `copy_files` and `setup_commands`.
 
 ```bash
 # Interactive setup for the current repo
@@ -342,7 +352,7 @@ cd ~/projects/my-app
 muxtree new feature-user-profiles --run claude
 
 # A terminal window opens with a tmux session:
-#   dev window:    cd'd into the worktree, run your dev server
+#   dev window:    cd'd into the worktree, setup commands already running
 #   agent window:  Claude Code is already running
 # Switch between them with Ctrl-b n / Ctrl-b p
 
@@ -365,7 +375,7 @@ muxtree sessions open feature-user-profiles --run claude
 
 muxtree is designed with security in mind:
 
-- **No shell execution of config** — config is parsed as plain key=value pairs, not sourced. Values containing shell metacharacters (`$`, `` ` ``, `;`, `|`, `&`) are ignored with a warning.
+- **No shell execution of config** — config is parsed as plain key=value pairs, not sourced. Values containing shell metacharacters (`$`, `` ` ``, `;`, `|`, `&`) are ignored with a warning. `setup_commands` allows `&`, `;`, and `|` since it holds intentional shell commands, but still rejects backticks and `$(...)`.
 - **AppleScript injection prevention** — session names are escaped before embedding in osascript.
 - **Branch name sanitization** — filesystem paths strip non-alphanumeric characters to prevent traversal.
 - **Command validation** — `--run` only accepts `claude` or `codex`.

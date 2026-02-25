@@ -14,6 +14,7 @@ CONFIG_FILE="$CONFIG_DIR/config"
 DEFAULT_WORKTREE_DIR="$HOME/worktrees"
 DEFAULT_TERMINAL="terminal"  # terminal | iterm2
 DEFAULT_COPY_FILES=""
+DEFAULT_SETUP_COMMANDS=""
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -57,16 +58,23 @@ _parse_config() {
         value="${value#"${value%%[![:space:]]*}"}"
         value="${value%"${value##*[![:space:]]}"}"
 
-        # Reject values containing shell metacharacters
-        if [[ "$value" =~ [\`\$\;\|\&] ]] || [[ "$value" == *'$('* ]]; then
+        # setup_commands intentionally contains shell commands; only reject
+        # command substitution (backticks, $(...)) to prevent config injection
+        if [[ "$key" == "setup_commands" ]]; then
+            if [[ "$value" =~ [\`] ]] || [[ "$value" == *'$('* ]]; then
+                warn "Ignoring suspicious value for '$key' in $file"
+                continue
+            fi
+        elif [[ "$value" =~ [\`\$\;\|\&] ]] || [[ "$value" == *'$('* ]]; then
             warn "Ignoring suspicious value for '$key' in $file"
             continue
         fi
 
         case "$key" in
-            worktree_dir) WORKTREE_DIR="$value" ;;
-            terminal)     TERMINAL="$value" ;;
-            copy_files)   COPY_FILES="$value" ;;
+            worktree_dir)    WORKTREE_DIR="$value" ;;
+            terminal)        TERMINAL="$value" ;;
+            copy_files)      COPY_FILES="$value" ;;
+            setup_commands)  SETUP_COMMANDS="$value" ;;
         esac
     done < <(grep -E '^[a-z_]+=' "$file")
 }
@@ -75,6 +83,7 @@ load_config() {
     WORKTREE_DIR="$DEFAULT_WORKTREE_DIR"
     TERMINAL="$DEFAULT_TERMINAL"
     COPY_FILES="$DEFAULT_COPY_FILES"
+    SETUP_COMMANDS="$DEFAULT_SETUP_COMMANDS"
     ACTIVE_CONFIG="none"
 
     # 1. Load global config as base
@@ -178,6 +187,11 @@ cmd_init() {
         info "Comma-separated, e.g.: .env,.env.local,CLAUDE.md"
         read -rp "Files to copy: " input_files
 
+        echo ""
+        info "Enter commands to run in the dev window when a new worktree is created."
+        info "Comma-separated, e.g.: npm install,npm run build"
+        read -rp "Setup commands: " input_setup
+
         cat > "$target_file" <<EOF
 # muxtree project config
 # Generated on $(date)
@@ -185,6 +199,10 @@ cmd_init() {
 # Files to copy from repo root into new worktrees (comma-separated, relative to repo root)
 # Supports glob patterns and directories
 copy_files=$input_files
+
+# Commands to run in the dev window when a new worktree is created (comma-separated)
+# Chained with && so execution stops on first failure
+setup_commands=$input_setup
 EOF
 
         success "Project config written to $target_file"
@@ -214,6 +232,11 @@ EOF
         info "Comma-separated, e.g.: .env,.env.local,CLAUDE.md"
         read -rp "Files to copy: " input_files
 
+        echo ""
+        info "Enter commands to run in the dev window when a new worktree is created."
+        info "Comma-separated, e.g.: npm install,npm run build"
+        read -rp "Setup commands: " input_setup
+
         cat > "$CONFIG_FILE" <<EOF
 # muxtree configuration
 # Generated on $(date)
@@ -227,6 +250,10 @@ terminal=$term
 # Files to copy from repo root into new worktrees (comma-separated, relative to repo root)
 # Supports glob patterns and directories
 copy_files=$input_files
+
+# Commands to run in the dev window when a new worktree is created (comma-separated)
+# Chained with && so execution stops on first failure
+setup_commands=$input_setup
 EOF
 
         success "Config written to $CONFIG_FILE"
@@ -358,6 +385,29 @@ cmd_new() {
 
     # 3. Launch tmux sessions
     _launch_sessions "$repo_name" "$branch" "$wt_path" "$run_cmd" "$bg"
+
+    # 4. Run setup commands in dev window
+    if [[ -n "$SETUP_COMMANDS" ]]; then
+        local sess
+        sess="$(session_prefix "$repo_name" "$branch")"
+        info "Running setup commands in dev window..."
+        IFS=',' read -ra cmds <<< "$SETUP_COMMANDS"
+        local chained=""
+        for cmd in "${cmds[@]}"; do
+            cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+            cmd="${cmd%"${cmd##*[![:space:]]}"}"
+            [[ -n "$cmd" ]] || continue
+            if [[ -n "$chained" ]]; then
+                chained="$chained && $cmd"
+            else
+                chained="$cmd"
+            fi
+            success "  ${DIM}$cmd${RESET}"
+        done
+        if [[ -n "$chained" ]]; then
+            tmux send-keys -t "$sess:dev" "$chained" Enter
+        fi
+    fi
 
     echo ""
     success "Ready! Worktree: ${CYAN}$wt_path${RESET}"
@@ -789,7 +839,7 @@ ${BOLD}EXAMPLES${RESET}
     muxtree delete feature-auth           # Remove worktree + branch
 
 ${BOLD}CONFIG${RESET}
-    Global:  ~/.muxtree/config          (worktree_dir, terminal, copy_files)
+    Global:  ~/.muxtree/config          (worktree_dir, terminal, copy_files, setup_commands)
     Project: .muxtree in repo root      (overrides global settings)
     Env:     MUXTREE_CONFIG_DIR=/path    (override global config dir)
 "
