@@ -6,7 +6,7 @@ set -euo pipefail
 # Create and manage git worktrees + tmux sessions for AI coding agents
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 CONFIG_DIR="${MUXTREE_CONFIG_DIR:-$HOME/.muxtree}"
 CONFIG_FILE="$CONFIG_DIR/config"
 
@@ -718,7 +718,8 @@ _sessions_open() {
     sess="$(session_prefix "$repo_name" "$branch")"
 
     if has_tmux_session "$sess"; then
-        warn "Session $sess already exists"
+        info "Session $sess already exists, opening terminal window"
+        _open_terminal "$sess"
     else
         # Create session with dev window
         tmux new-session -d -s "$sess" -c "$wt_path"
@@ -819,7 +820,7 @@ ${BOLD}COMMANDS${RESET}
     ${CYAN}delete${RESET} <branch> [--force]          Delete worktree and branch (with confirmation)
 
     ${CYAN}sessions${RESET} <action> <branch> [opts]  Manage tmux session for a worktree
-        open   <branch> [--run cmd]   Create session & open terminal
+        open   <branch> [--run cmd]   Open terminal (creates session if needed)
         close  <branch>               Kill tmux session
         relaunch <branch> [--run cmd] Close + reopen session
         attach <branch> [dev|agent]   Attach to session (optionally select window)
