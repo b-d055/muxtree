@@ -95,7 +95,7 @@ _muxtree() {
                     _arguments \
                         '1:branch:' \
                         '--from[Base branch]:branch:($(_muxtree_git_branches))' \
-                        '--run[Auto-run command in agent window]:command:(claude codex)' \
+                        '--run[Auto-run command in agent window]:command:(claude codex opencode)' \
                         '--bg[Create session without opening terminal]'
                     ;;
                 delete|rm)
@@ -118,7 +118,7 @@ _muxtree() {
                                 open|launch|start)
                                     _arguments \
                                         '1:branch:($(_muxtree_managed_branches))' \
-                                        '--run[Auto-run command]:command:(claude codex)' \
+                                        '--run[Auto-run command]:command:(claude codex opencode)' \
                                         '--bg[Create without opening terminal]'
                                     ;;
                                 close|kill|stop)
@@ -128,7 +128,7 @@ _muxtree() {
                                 relaunch|restart)
                                     _arguments \
                                         '1:branch:($(_muxtree_managed_branches))' \
-                                        '--run[Auto-run command]:command:(claude codex)' \
+                                        '--run[Auto-run command]:command:(claude codex opencode)' \
                                         '--bg[Create without opening terminal]'
                                     ;;
                                 attach)

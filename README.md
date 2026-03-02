@@ -8,7 +8,7 @@
 
 **Tmux Worktree Session Manager**
 
-A lightweight CLI for spinning up isolated git worktrees paired with tmux sessions, purpose-built for running parallel [Claude Code](https://code.claude.com/docs) or [Codex](https://openai.com/codex/) sessions on macOS.
+A lightweight CLI for spinning up isolated git worktrees paired with tmux sessions, purpose-built for running parallel [Claude Code](https://code.claude.com/docs), [Codex](https://openai.com/codex/), or [OpenCode](https://opencode.ai/) sessions on macOS.
 
 Each `muxtree new` call gives you a fresh branch in its own directory with your config files copied in, setup commands run, and a tmux session with two windows ready to go — one for viewing code and running your app, one for your AI coding agent. Switch between them with `Ctrl-b n` / `Ctrl-b p`.
 
@@ -65,7 +65,7 @@ muxtree new feature-auth
 
 # 4. A terminal window opens with a tmux session containing two windows:
 #    • dev    ← run your app, browse code
-#    • agent  ← run claude/codex here
+#    • agent  ← run claude/codex/opencode here
 #    Switch windows with Ctrl-b n / Ctrl-b p
 ```
 
@@ -146,6 +146,9 @@ muxtree new feature-ai --run claude
 
 # Auto-launch Codex instead
 muxtree new feature-ai --run codex
+
+# Auto-launch OpenCode instead
+muxtree new feature-ai --run opencode
 
 # Create worktree + session without opening a terminal window
 muxtree new fix-bug --bg
@@ -332,7 +335,7 @@ Each worktree gets a single tmux session named `<repo>_<branch>` with two window
 ```
 my-app_feature-auth
   ├── dev     ← for running your app / viewing code
-  └── agent   ← for Claude Code / Codex
+  └── agent   ← for Claude Code / Codex / OpenCode
 ```
 
 Switch between windows with `Ctrl-b n` (next) and `Ctrl-b p` (previous).
@@ -378,7 +381,7 @@ muxtree is designed with security in mind:
 - **No shell execution of config** — config is parsed as plain key=value pairs, not sourced. Values containing shell metacharacters (`$`, `` ` ``, `;`, `|`, `&`) are ignored with a warning. `setup_commands` allows `&`, `;`, and `|` since it holds intentional shell commands, but still rejects backticks and `$(...)`.
 - **AppleScript injection prevention** — session names are escaped before embedding in osascript.
 - **Branch name sanitization** — filesystem paths strip non-alphanumeric characters to prevent traversal.
-- **Command validation** — `--run` only accepts `claude` or `codex`.
+- **Command validation** — `--run` only accepts `claude`, `codex`, or `opencode`.
 - **Safe file operations** — `--` separators on `rm`, `cp`, `mkdir` to handle edge-case filenames.
 
 ---
