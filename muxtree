@@ -309,13 +309,13 @@ cmd_new() {
         esac
     done
 
-    [[ -n "$branch" ]] || die "Usage: muxtree new <branch-name> [--from <base-branch>] [--run claude|codex] [--bg]"
+    [[ -n "$branch" ]] || die "Usage: muxtree new <branch-name> [--from <base-branch>] [--run claude|codex|opencode] [--bg]"
 
     # Validate --run command if provided
     if [[ -n "$run_cmd" ]]; then
         case "$run_cmd" in
-            claude|codex) ;;
-            *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex" ;;
+            claude|codex|opencode) ;;
+            *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex, opencode" ;;
         esac
     fi
 
@@ -666,11 +666,11 @@ cmd_sessions() {
 
     case "$action" in
         open|launch|start)
-            [[ -n "$branch" ]] || die "Usage: muxtree sessions open <branch> [--run claude|codex] [--bg]"
+            [[ -n "$branch" ]] || die "Usage: muxtree sessions open <branch> [--run claude|codex|opencode] [--bg]"
             if [[ -n "$run_cmd" ]]; then
                 case "$run_cmd" in
-                    claude|codex) ;;
-                    *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex" ;;
+                    claude|codex|opencode) ;;
+                    *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex, opencode" ;;
                 esac
             fi
             _sessions_open "$branch" "$run_cmd" "$bg"
@@ -680,11 +680,11 @@ cmd_sessions() {
             _sessions_close "$branch"
             ;;
         relaunch|restart)
-            [[ -n "$branch" ]] || die "Usage: muxtree sessions relaunch <branch> [--run claude|codex] [--bg]"
+            [[ -n "$branch" ]] || die "Usage: muxtree sessions relaunch <branch> [--run claude|codex|opencode] [--bg]"
             if [[ -n "$run_cmd" ]]; then
                 case "$run_cmd" in
-                    claude|codex) ;;
-                    *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex" ;;
+                    claude|codex|opencode) ;;
+                    *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex, opencode" ;;
                 esac
             fi
             _sessions_close "$branch"
@@ -695,7 +695,7 @@ cmd_sessions() {
             _sessions_attach "$branch" "${extra_arg:-}"
             ;;
         *)
-            die "Usage: muxtree sessions <open|close|relaunch|attach> <branch> [--run claude|codex] [--bg]"
+            die "Usage: muxtree sessions <open|close|relaunch|attach> <branch> [--run claude|codex|opencode] [--bg]"
             ;;
     esac
 }
@@ -812,7 +812,7 @@ ${BOLD}COMMANDS${RESET}
 
     ${CYAN}new${RESET} <branch> [options]             Create worktree + tmux session
         --from <branch>               Base branch (default: main/master)
-        --run <claude|codex>          Auto-run command in agent window
+        --run <claude|codex|opencode> Auto-run command in agent window
         --bg                          Create session without opening terminal
 
     ${CYAN}list${RESET}                              List worktrees, diff stats, session status
@@ -820,10 +820,10 @@ ${BOLD}COMMANDS${RESET}
     ${CYAN}delete${RESET} <branch> [--force]          Delete worktree and branch (with confirmation)
 
     ${CYAN}sessions${RESET} <action> <branch> [opts]  Manage tmux session for a worktree
-        open   <branch> [--run cmd]   Open terminal (creates session if needed)
-        close  <branch>               Kill tmux session
-        relaunch <branch> [--run cmd] Close + reopen session
-        attach <branch> [dev|agent]   Attach to session (optionally select window)
+        open   <branch> [--run cmd]    Open terminal (creates session if needed)
+        close  <branch>                Kill tmux session
+        relaunch <branch> [--run cmd]  Close + reopen session
+        attach <branch> [dev|agent]    Attach to session (optionally select window)
 
     ${CYAN}help${RESET}                              Show this help message
 
@@ -832,7 +832,7 @@ ${BOLD}EXAMPLES${RESET}
     muxtree init --local                  # Project-specific copy_files
     muxtree new feature-auth              # New worktree from main
     muxtree new fix-bug --from develop    # New worktree from develop
-    muxtree new feature-ai --run claude   # Auto-launch claude code
+    muxtree new feature-ai --run claude   # Auto-launch Claude Code
     muxtree new fix-bug --bg              # Create without opening terminals
     muxtree list                          # Show all worktrees + status
     muxtree sessions close feature-auth   # Kill tmux sessions

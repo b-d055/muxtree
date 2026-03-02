@@ -74,7 +74,7 @@ _muxtree() {
                     COMPREPLY=($(compgen -W "$branches" -- "$cur"))
                     ;;
                 --run)
-                    COMPREPLY=($(compgen -W "claude codex" -- "$cur"))
+                    COMPREPLY=($(compgen -W "claude codex opencode" -- "$cur"))
                     ;;
                 *)
                     if [[ "$cur" == -* ]]; then
@@ -115,7 +115,7 @@ _muxtree() {
                 open|launch|start|relaunch|restart)
                     case "$prev" in
                         --run)
-                            COMPREPLY=($(compgen -W "claude codex" -- "$cur"))
+                            COMPREPLY=($(compgen -W "claude codex opencode" -- "$cur"))
                             ;;
                         *)
                             if [[ "$cur" == -* ]]; then
