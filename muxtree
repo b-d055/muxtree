@@ -6,7 +6,7 @@ set -euo pipefail
 # Create and manage git worktrees + tmux sessions for AI coding agents
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 CONFIG_DIR="${MUXTREE_CONFIG_DIR:-$HOME/.muxtree}"
 CONFIG_FILE="$CONFIG_DIR/config"
 
@@ -158,6 +158,23 @@ has_tmux_session() {
     tmux has-session -t "$1" 2>/dev/null
 }
 
+_build_run_cmd() {
+    local run_cmd="$1"
+    local prompt="${2:-}"
+
+    if [[ -z "$prompt" ]]; then
+        echo "$run_cmd"
+        return
+    fi
+
+    # Escape single quotes in prompt for shell safety
+    local escaped="${prompt//\'/\'\\\'\'}"
+    case "$run_cmd" in
+        claude) echo "claude '${escaped}'" ;;
+        codex)  echo "codex '${escaped}'" ;;
+    esac
+}
+
 # ── Config Management ─────────────────────────────────────────────────────────
 
 cmd_init() {
@@ -297,19 +314,21 @@ cmd_new() {
     local branch=""
     local base_branch=""
     local run_cmd=""
+    local prompt=""
     local bg=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --from)  base_branch="$2"; shift 2 ;;
-            --run)   run_cmd="$2"; shift 2 ;;
-            --bg)    bg=true; shift ;;
-            -*)      die "Unknown option: $1" ;;
-            *)       branch="$1"; shift ;;
+            --from)      base_branch="$2"; shift 2 ;;
+            --run)       run_cmd="$2"; shift 2 ;;
+            --prompt|-p) prompt="$2"; shift 2 ;;
+            --bg)        bg=true; shift ;;
+            -*)          die "Unknown option: $1" ;;
+            *)           branch="$1"; shift ;;
         esac
     done
 
-    [[ -n "$branch" ]] || die "Usage: muxtree new <branch-name> [--from <base-branch>] [--run claude|codex] [--bg]"
+    [[ -n "$branch" ]] || die "Usage: muxtree new <branch-name> [--from <base-branch>] [--run claude|codex] [--prompt \"...\"] [--bg]"
 
     # Validate --run command if provided
     if [[ -n "$run_cmd" ]]; then
@@ -317,6 +336,16 @@ cmd_new() {
             claude|codex) ;;
             *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex" ;;
         esac
+    fi
+
+    # Validate --prompt requires --run
+    if [[ -n "$prompt" && -z "$run_cmd" ]]; then
+        die "--prompt requires --run <claude|codex>"
+    fi
+
+    # Build full command with prompt
+    if [[ -n "$prompt" ]]; then
+        run_cmd="$(_build_run_cmd "$run_cmd" "$prompt")"
     fi
 
     ensure_git_repo
@@ -650,6 +679,7 @@ cmd_sessions() {
     local action="${1:-}"
     local branch="${2:-}"
     local run_cmd=""
+    local prompt=""
     local bg=false
 
     # Parse remaining args
@@ -657,21 +687,28 @@ cmd_sessions() {
     shift 2 2>/dev/null || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --run) run_cmd="$2"; shift 2 ;;
-            --bg)  bg=true; shift ;;
-            -*)    die "Unknown option: $1" ;;
-            *)     extra_arg="$1"; shift ;;
+            --run)       run_cmd="$2"; shift 2 ;;
+            --prompt|-p) prompt="$2"; shift 2 ;;
+            --bg)        bg=true; shift ;;
+            -*)          die "Unknown option: $1" ;;
+            *)           extra_arg="$1"; shift ;;
         esac
     done
 
     case "$action" in
         open|launch|start)
-            [[ -n "$branch" ]] || die "Usage: muxtree sessions open <branch> [--run claude|codex] [--bg]"
+            [[ -n "$branch" ]] || die "Usage: muxtree sessions open <branch> [--run claude|codex] [--prompt \"...\"] [--bg]"
             if [[ -n "$run_cmd" ]]; then
                 case "$run_cmd" in
                     claude|codex) ;;
                     *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex" ;;
                 esac
+            fi
+            if [[ -n "$prompt" && -z "$run_cmd" ]]; then
+                die "--prompt requires --run <claude|codex>"
+            fi
+            if [[ -n "$prompt" ]]; then
+                run_cmd="$(_build_run_cmd "$run_cmd" "$prompt")"
             fi
             _sessions_open "$branch" "$run_cmd" "$bg"
             ;;
@@ -680,12 +717,18 @@ cmd_sessions() {
             _sessions_close "$branch"
             ;;
         relaunch|restart)
-            [[ -n "$branch" ]] || die "Usage: muxtree sessions relaunch <branch> [--run claude|codex] [--bg]"
+            [[ -n "$branch" ]] || die "Usage: muxtree sessions relaunch <branch> [--run claude|codex] [--prompt \"...\"] [--bg]"
             if [[ -n "$run_cmd" ]]; then
                 case "$run_cmd" in
                     claude|codex) ;;
                     *) die "Invalid --run command: '$run_cmd'. Allowed: claude, codex" ;;
                 esac
+            fi
+            if [[ -n "$prompt" && -z "$run_cmd" ]]; then
+                die "--prompt requires --run <claude|codex>"
+            fi
+            if [[ -n "$prompt" ]]; then
+                run_cmd="$(_build_run_cmd "$run_cmd" "$prompt")"
             fi
             _sessions_close "$branch"
             _sessions_open "$branch" "$run_cmd" "$bg"
@@ -813,6 +856,7 @@ ${BOLD}COMMANDS${RESET}
     ${CYAN}new${RESET} <branch> [options]             Create worktree + tmux session
         --from <branch>               Base branch (default: main/master)
         --run <claude|codex>          Auto-run command in agent window
+        --prompt|-p <text>            Prompt to pass to the agent (requires --run)
         --bg                          Create session without opening terminal
 
     ${CYAN}list${RESET}                              List worktrees, diff stats, session status
@@ -821,8 +865,10 @@ ${BOLD}COMMANDS${RESET}
 
     ${CYAN}sessions${RESET} <action> <branch> [opts]  Manage tmux session for a worktree
         open   <branch> [--run cmd]   Open terminal (creates session if needed)
+               [--prompt "..."]
         close  <branch>               Kill tmux session
         relaunch <branch> [--run cmd] Close + reopen session
+               [--prompt "..."]
         attach <branch> [dev|agent]   Attach to session (optionally select window)
 
     ${CYAN}help${RESET}                              Show this help message
@@ -833,6 +879,8 @@ ${BOLD}EXAMPLES${RESET}
     muxtree new feature-auth              # New worktree from main
     muxtree new fix-bug --from develop    # New worktree from develop
     muxtree new feature-ai --run claude   # Auto-launch claude code
+    muxtree new fix-bug --run claude \\
+      --prompt "fix the login bug"        # Launch claude with a prompt
     muxtree new fix-bug --bg              # Create without opening terminals
     muxtree list                          # Show all worktrees + status
     muxtree sessions close feature-auth   # Kill tmux sessions
