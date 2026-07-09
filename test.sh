@@ -462,6 +462,52 @@ guard_result=$(bash -c '
 ')
 assert_eq "sourcing never dispatches commands" "guard-ok" "$guard_result"
 
+# ── 13. _git_stats (scratch repo) ────────────────────────────────────────────
+
+echo ""
+echo "== _git_stats =="
+
+STATS_REPO="$TMPDIR_TEST/stats-repo"
+mkdir -p "$STATS_REPO"
+git -C "$STATS_REPO" init -q 2>/dev/null
+_stats_commit() {
+    git -C "$STATS_REPO" -c user.email=test@test -c user.name=test \
+        -c commit.gpgsign=false commit -q "$@"
+}
+printf 'one\ntwo\n' > "$STATS_REPO/tracked.txt"
+git -C "$STATS_REPO" add tracked.txt
+_stats_commit -m init
+
+printf 'one\nCHANGED\n' > "$STATS_REPO/tracked.txt"   # unstaged edit: +1 -1
+mkdir -p "$STATS_REPO/newdir"
+printf 'a\n' > "$STATS_REPO/newdir/a.txt"
+printf 'b\n' > "$STATS_REPO/newdir/b.txt"
+
+_git_stats "$STATS_REPO"
+# Regression: without -uall an untracked directory shows as one "?? newdir/"
+# entry, undercounting the 2 files inside it.
+assert_eq "untracked dir counts its files" "3" "$G_FILES"
+assert_eq "insertions vs HEAD"             "1" "$G_INS"
+assert_eq "deletions vs HEAD"              "1" "$G_DEL"
+
+# Regression: staged + unstaged edits used to be summed (diff + diff --cached),
+# double-counting the staged hunk. One file, staged and edited again on top.
+git -C "$STATS_REPO" add tracked.txt
+printf 'one\nCHANGED\nthree\n' > "$STATS_REPO/tracked.txt"
+
+_git_stats "$STATS_REPO"
+assert_eq "staged+unstaged file counts once"     "3" "$G_FILES"
+assert_eq "staged changes not double-counted +"  "2" "$G_INS"
+assert_eq "staged changes not double-counted -"  "1" "$G_DEL"
+
+# A clean worktree is all zeros.
+git -C "$STATS_REPO" add -A
+_stats_commit -m wip
+_git_stats "$STATS_REPO"
+assert_eq "clean worktree files" "0" "$G_FILES"
+assert_eq "clean worktree +"     "0" "$G_INS"
+assert_eq "clean worktree -"     "0" "$G_DEL"
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 echo ""
