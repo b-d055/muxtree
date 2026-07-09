@@ -6,7 +6,7 @@ set -euo pipefail
 # Create and manage git worktrees + tmux sessions for AI coding agents
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="1.0.2"
+VERSION="1.1.0"
 CONFIG_DIR="${MUXTREE_CONFIG_DIR:-$HOME/.muxtree}"
 CONFIG_FILE="$CONFIG_DIR/config"
 
@@ -17,14 +17,17 @@ DEFAULT_COPY_FILES=""
 DEFAULT_SETUP_COMMANDS=""
 
 # ── Colors ────────────────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-DIM='\033[2m'
-RESET='\033[0m'
+# ANSI-C quoted, so these hold real ESC characters rather than the 5-character
+# sequence \033. `echo -e` renders both identically, but printf '%s' -- used by
+# the status pane -- only renders the real thing.
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+RESET=$'\033[0m'
 
 if [[ ! -t 1 ]]; then
     RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' RESET=''
@@ -155,7 +158,92 @@ session_prefix() {
 }
 
 has_tmux_session() {
-    tmux has-session -t "$1" 2>/dev/null
+    # '=' forces an exact-name match: a bare -t prefix-matches, so with
+    # sessions "repo_fix" and "repo_fix-bug" the former would answer for both.
+    tmux has-session -t "=$1" 2>/dev/null
+}
+
+# Attach to a session, switching clients when already inside tmux -- a bare
+# `tmux attach` from within tmux fails with "sessions should be nested with care".
+_attach_session() {
+    local sess="$1"
+    if [[ -n "${TMUX:-}" ]]; then
+        exec tmux switch-client -t "$sess"
+    else
+        exec tmux attach -t "$sess"
+    fi
+}
+
+# ── Worktree introspection (shared by list, status, delete, sessions) ─────────
+
+# Managed worktrees under $WORKTREE_DIR base $1, one per line: "<dir>\t<branch>".
+# Detached HEADs are emitted with branch "(detached)" -- callers display them;
+# hiding them would make a worktree with a live agent vanish from view.
+_managed_worktrees() {
+    local wt_base="$1" l wt_dir="" branch=""
+    # --porcelain: unambiguous (paths with spaces, branch names with brackets),
+    # and reports detached HEADs explicitly.
+    while IFS= read -r l || [[ -n "$l" ]]; do
+        case "$l" in
+            'worktree '*) wt_dir="${l#worktree }"; branch="" ; continue ;;
+            'branch '*)   branch="${l#branch refs/heads/}" ; continue ;;
+            'detached')   branch="(detached)" ; continue ;;
+            '') ;;
+            *) continue ;;
+        esac
+
+        # blank line = end of one worktree record
+        [[ -n "$wt_dir" && -n "$branch" ]] || { wt_dir=""; continue; }
+        [[ "$wt_dir" == "$wt_base"/* ]] || { wt_dir=""; continue; }
+
+        printf '%s\t%s\n' "$wt_dir" "$branch"
+        wt_dir=""
+    done < <(git worktree list --porcelain; printf '\n')
+}
+
+# Changed-file count and +/- for one worktree, in two git calls.
+# Sets G_FILES, G_INS, G_DEL. Untracked files count toward G_FILES (they are
+# real changes) but not toward +/-, which is what `git diff` can see.
+# `git diff HEAD` already includes staged changes -- do not add --cached on top.
+_git_stats() {
+    local wt="$1" l short parts i
+    G_FILES=0; G_INS=0; G_DEL=0
+
+    while IFS= read -r l; do
+        case "$l" in
+            '## '*|'') ;;
+            *) G_FILES=$(( G_FILES + 1 )) ;;
+        esac
+    done < <(git -C "$wt" status --porcelain=v1 --branch 2>/dev/null)
+
+    short="$(git -C "$wt" diff --shortstat HEAD 2>/dev/null || true)"
+    [[ -n "$short" ]] || return 0
+
+    # " 3 files changed, 19 insertions(+), 23 deletions(-)"
+    read -ra parts <<< "$short"
+    for (( i = 1; i < ${#parts[@]}; i++ )); do
+        case "${parts[$i]}" in
+            insertion*) G_INS="${parts[$(( i - 1 ))]}" ;;
+            deletion*)  G_DEL="${parts[$(( i - 1 ))]}" ;;
+        esac
+    done
+}
+
+# The tmux session for a worktree. muxtree names sessions after the branch at
+# creation time, but a branch can be renamed or checked out elsewhere later --
+# the worktree *directory* is the stable key, so prefer it and fall back.
+_resolve_session() {
+    local repo_name="$1" wt_dir="$2" branch="$3" cand
+    cand="$(session_prefix "$repo_name" "${wt_dir##*/}")"
+    if has_tmux_session "$cand"; then
+        printf '%s' "$cand"; return 0
+    fi
+    # A detached HEAD has no branch to name a session after -- the worktree
+    # directory is all there is.
+    if [[ "$branch" == "(detached)" ]]; then
+        printf '%s' "$cand"; return 0
+    fi
+    session_prefix "$repo_name" "$branch"
 }
 
 _build_run_cmd() {
@@ -528,44 +616,15 @@ cmd_list() {
 
     local found=false
 
-    # Iterate through git worktrees and match our managed ones
-    while IFS= read -r wt_line; do
-        local wt_dir branch_name
-
-        wt_dir="$(echo "$wt_line" | awk '{print $1}')"
-        branch_name="$(echo "$wt_line" | sed -n 's/.*\[\(.*\)\].*/\1/p')"
-
-        # Skip detached HEAD worktrees
-        [[ -n "$branch_name" ]] || continue
-
-        # Skip worktrees not in our managed directory
-        [[ "$wt_dir" == "$wt_base"/* ]] || continue
-
+    local wt_dir branch_name sess diff_stat sess_status
+    while IFS=$'\t' read -r wt_dir branch_name; do
         found=true
 
-        local sess
-        sess="$(session_prefix "$repo_name" "$branch_name")"
+        sess="$(_resolve_session "$repo_name" "$wt_dir" "$branch_name")"
 
-        # Diff stats
-        local diff_stat=""
-        if [[ -d "$wt_dir/.git" || -f "$wt_dir/.git" ]]; then
-            local insertions deletions
-            insertions=$(git -C "$wt_dir" diff --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-            deletions=$(git -C "$wt_dir" diff --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+        _git_stats "$wt_dir"
+        diff_stat="${GREEN}+${G_INS}${RESET} ${RED}-${G_DEL}${RESET} ${DIM}${G_FILES}f${RESET}"
 
-            # Also count staged changes
-            local staged_ins staged_del
-            staged_ins=$(git -C "$wt_dir" diff --cached --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-            staged_del=$(git -C "$wt_dir" diff --cached --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
-
-            local total_ins=$(( ${insertions:-0} + ${staged_ins:-0} ))
-            local total_del=$(( ${deletions:-0} + ${staged_del:-0} ))
-
-            diff_stat="${GREEN}+${total_ins}${RESET} ${RED}-${total_del}${RESET}"
-        fi
-
-        # Tmux session status
-        local sess_status
         if has_tmux_session "$sess"; then
             sess_status="${GREEN}●${RESET}"
         else
@@ -577,7 +636,7 @@ cmd_list() {
         echo -e "  ${DIM}$wt_dir${RESET}"
         echo -e "  Session: $sess_status $sess"
 
-    done < <(git worktree list)
+    done < <(_managed_worktrees "$wt_base")
 
     if ! $found; then
         info "No managed worktrees found. Use ${BOLD}muxtree new <branch>${RESET} to create one."
@@ -614,22 +673,12 @@ cmd_delete() {
     fi
 
     # Show diff stats before confirming
-    local insertions deletions
-    insertions=$(git -C "$wt_path" diff --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-    deletions=$(git -C "$wt_path" diff --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
-
-    # Also count staged changes
-    local staged_ins staged_del
-    staged_ins=$(git -C "$wt_path" diff --cached --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-    staged_del=$(git -C "$wt_path" diff --cached --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
-
-    local total_ins=$(( ${insertions:-0} + ${staged_ins:-0} ))
-    local total_del=$(( ${deletions:-0} + ${staged_del:-0} ))
+    _git_stats "$wt_path"
 
     echo ""
     echo -e "  Branch:    ${BOLD}$branch${RESET}"
     echo -e "  Path:      ${DIM}$wt_path${RESET}"
-    echo -e "  Changes:   ${GREEN}+${total_ins}${RESET} ${RED}-${total_del}${RESET}"
+    echo -e "  Changes:   ${GREEN}+${G_INS}${RESET} ${RED}-${G_DEL}${RESET} (${G_FILES} files)"
     echo ""
 
     if ! $force; then
@@ -758,7 +807,7 @@ _sessions_open() {
     [[ -d "$wt_path" ]] || die "Worktree not found: $wt_path"
 
     local sess
-    sess="$(session_prefix "$repo_name" "$branch")"
+    sess="$(_resolve_session "$repo_name" "$wt_path" "$branch")"
 
     if has_tmux_session "$sess"; then
         info "Session $sess already exists, opening terminal window"
@@ -809,7 +858,7 @@ _sessions_attach() {
 
     local repo_name sess
     repo_name="$(get_repo_name)"
-    sess="$(session_prefix "$repo_name" "$branch")"
+    sess="$(_resolve_session "$repo_name" "$(worktree_path "$repo_name" "$branch")" "$branch")"
 
     if ! has_tmux_session "$sess"; then
         die "Session not found: $sess"
@@ -823,7 +872,7 @@ _sessions_attach() {
         esac
     fi
 
-    tmux attach -t "$sess"
+    _attach_session "$sess"
 }
 
 _kill_sessions() {
@@ -831,11 +880,540 @@ _kill_sessions() {
     local branch="$2"
 
     local sess
-    sess="$(session_prefix "$repo_name" "$branch")"
+    sess="$(_resolve_session "$repo_name" "$(worktree_path "$repo_name" "$branch")" "$branch")"
 
     if has_tmux_session "$sess"; then
         tmux kill-session -t "$sess"
         success "Killed session ${BOLD}$sess${RESET}"
+    fi
+}
+
+# ── Status Pane ───────────────────────────────────────────────────────────────
+
+STATUS_DEFAULT_INTERVAL=2
+
+# Listening ports change far more slowly than agent output, and lsof is the
+# most expensive call in a frame -- refresh the port map at most this often.
+PORTS_TTL=6
+
+# Column widths (characters). Header pads and row pads both read these, and
+# the fixed-row total is derived from them in _status_frame -- to resize a
+# column, change it here and nowhere else.
+W_BRANCH=22 W_AGENT=12 W_INS=6 W_DEL=6 W_FILES=4 W_PORTS=9 W_TERM=5
+W_OUT_MIN=12
+
+# ── Agent TUI markers ─────────────────────────────────────────────────────────
+# These strings are agent TUI chrome and will drift between releases; they are
+# the price of not requiring hooks. Verified against Claude Code 2.1.x and
+# codex-cli 0.144.0 (fixtures in test.sh pin both). Both _is_chrome and
+# _classify_pane read these tables -- a UI drift is fixed HERE, in one place.
+#
+# Each entry is a bash glob, matched unanchored against the whole pane text
+# (state markers) or against one left-trimmed line (chrome patterns).
+#
+# Input: Claude Code renders a "❯ 1." selector with dialog trailers; Codex
+# renders "› 1." (U+203A, a different glyph) with "Press enter to confirm/
+# continue" trailers.
+INPUT_MARKERS=(
+    '*❯ 1.*' '*Esc to cancel · Tab to amend*' '*Enter to confirm*' '*\[y/n]*'
+    '*› 1.*' '*Press enter to*'
+)
+# Both agents hint "esc to interrupt" while running (Codex: "• Working (2s •
+# esc to interrupt)").
+WORKING_MARKERS=('*esc to interrupt*' '*Esc to interrupt*')
+# Claude Code idles with its hint bar; Codex idles showing its "› " composer
+# (any line starting with it -- the second pattern covers a capture whose
+# first line is the composer).
+IDLE_MARKERS=(
+    '*\? for shortcuts*' '*for agents*' '*to cycle*'
+    $'*\n› *' '› *'
+)
+# Line-level chrome beyond the composer/hint-bar strings in IDLE_MARKERS: box
+# rules, the input line, the feedback survey, the "✻ Worked for 30s" summary
+# (glyph, word, "for", duration -- the leading char must be non-alphanumeric so
+# prose like "I ran for 3 hours" is not swallowed), Claude's tool-output
+# truncation notice, and Codex's "<model> <effort> · <cwd>" footer (the path
+# after " · " may be absolute or ~-abbreviated).
+CHROME_PATTERNS=(
+    '───*' '╌╌╌*' '━━━*' '❯*'
+    '*⏵⏵*' '*⏸*' '*new task\?*'
+    '*How is Claude doing*' '1: Bad*'
+    '[![:alnum:]] * for [0-9]*'
+    '*\(ctrl+o to expand\)*'   # parens escaped: bare *( ) is an extglob operator
+    '* · /*' '* · ~/*'
+)
+
+# Does $1 match any of the glob patterns in the remaining args? Pure bash.
+_matches_any() {
+    local s="$1" p
+    shift
+    for p in "$@"; do
+        [[ "$s" == $p ]] && return 0
+    done
+    return 1
+}
+
+# This whole section is deliberately fork-free on the hot path: a frame redraws
+# every couple of seconds, and a pipeline per worktree (grep, tr, $( )) costs
+# far more than the git and lsof calls it surrounds.
+
+# Pad or truncate $2 to exactly $3 columns, assigning to the variable named $1.
+# Char-aware, not byte-aware -- printf '%-*s' pads by bytes and would misalign
+# every row containing a multi-byte glyph.
+_pad_v() {
+    local s="$2" w="$3" n i out
+    n=${#s}
+    if (( n > w )); then
+        out="${s:0:w-1}…"
+    else
+        out="$s"
+        for (( i = n; i < w; i++ )); do out+=" "; done
+    fi
+    printf -v "$1" '%s' "$out"
+}
+
+# Terminal width, into the variable named $1.
+#
+# `tput cols` is wrong here: inside $( ) its stdout is a pipe, so it cannot
+# ioctl the tty and silently falls back to terminfo's 80. For the same reason
+# we must not gate this on [[ -t 1 ]] -- ask /dev/tty directly, and let the
+# open fail (cron, pipes with no controlling tty) select the fallback.
+_term_cols_v() {
+    local c=""
+    # The group's stderr is redirected because a failing `</dev/tty` open is
+    # reported by the shell, not by stty -- `stty 2>/dev/null` would not hide it.
+    c="$( { stty size </dev/tty; } 2>/dev/null | cut -d' ' -f2 || true)"
+    [[ "$c" =~ ^[0-9]+$ ]] || c="${COLUMNS:-100}"
+    printf -v "$1" '%s' "$c"
+}
+
+# A horizontal rule $2 columns wide, assigned to the variable named $1.
+_rule_v() {
+    local w="$2" i out=""
+    for (( i = 0; i < w; i++ )); do out+="─"; done
+    printf -v "$1" '%s' "$out"
+}
+
+# Trim, strip agent line markers, squeeze runs of spaces. Pure bash.
+_clean_line() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    s="${s#⏺ }"
+    s="${s#⎿ }"
+    s="${s#❯ }"
+    s="${s#• }"
+    s="${s#› }"
+    while [[ "$s" == *"  "* ]]; do s="${s//  / }"; done
+    printf -v CLEANED '%s' "$s"
+}
+
+# Is this line UI chrome rather than agent output? The chrome table plus the
+# hint-bar strings that double as idle markers -- one source for both uses.
+_is_chrome() {
+    local l="$1" t="${1#"${1%%[![:space:]]*}"}"
+    # Blank check as a glob *test*, never "${l//[[:space:]]/}": bash's global
+    # substitution with a bracket expression is quadratic and costs ~700ms on a
+    # 2KB pane, which is most of a refresh tick.
+    [[ "$l" == *[![:space:]]* ]] || return 0
+    _matches_any "$t" "${CHROME_PATTERNS[@]}" "${IDLE_MARKERS[@]}"
+}
+
+# Classify captured pane text against the marker tables above. Sets A_STATE
+# and A_LINE.
+#   A_STATE: input | working | idle | shell
+_classify_pane() {
+    local txt="$1" l
+    A_STATE="shell"; A_LINE=""
+
+    [[ "$txt" == *[![:space:]]* ]] || return 0
+
+    # Order matters. A permission dialog also renders the hint bar, and the
+    # working spinner also renders "for agents" -- so test most-specific first.
+    if _matches_any "$txt" "${INPUT_MARKERS[@]}"; then
+        A_STATE="input"
+        # The question/reason line, if one is recognizable (Claude and Codex
+        # phrasings); the last match wins, which favors Codex's "Reason:" line
+        # over its generic "Would you like to..." question.
+        while IFS= read -r l; do
+            case "$l" in
+                *"Do you want to"*|*"trust this folder"*|*Allow*|*Approve*) A_LINE="$l" ;;
+                *"Would you like to"*|*"Do you trust"*)                     A_LINE="$l" ;;
+            esac
+        done <<< "$txt"
+        if [[ -z "$A_LINE" ]]; then
+            while IFS= read -r l; do
+                case "${l#"${l%%[![:space:]]*}"}" in "❯ 1."*|"› 1."*) A_LINE="$l" ;; esac
+            done <<< "$txt"
+        fi
+    elif _matches_any "$txt" "${WORKING_MARKERS[@]}"; then
+        A_STATE="working"
+        # The live status line: Claude's spinner "✢ Meandering… (4s · ↓ 65
+        # tokens)" or Codex's "• Working (2s • esc to interrupt)".
+        while IFS= read -r l; do
+            case "$l" in *…*|*"• Working ("*) _is_chrome "$l" || A_LINE="$l" ;; esac
+        done <<< "$txt"
+        [[ -n "$A_LINE" ]] || A_LINE="working"
+    elif _matches_any "$txt" "${IDLE_MARKERS[@]}"; then
+        A_STATE="idle"
+        while IFS= read -r l; do
+            _is_chrome "$l" || A_LINE="$l"
+        done <<< "$txt"
+    fi
+
+    _clean_line "$A_LINE"
+    A_LINE="$CLEANED"
+}
+
+# Scrape a session's agent window. Sets A_STATE (plus "nosession") and A_LINE.
+# $2 is session liveness ("1" = alive), which the caller already knows from its
+# list-sessions snapshot -- re-asking tmux here would fork once per row per
+# frame, and a second oracle could disagree with the TERM column mid-frame.
+_agent_status() {
+    local sess="$1" alive="${2:-}" txt
+    A_STATE="nosession"; A_LINE=""
+
+    [[ "$alive" == "1" ]] || return 0
+
+    # Session is alive from here on, so any capture failure (no 'agent' window)
+    # means "no agent", not "no session".
+    A_STATE="shell"
+    txt="$(tmux capture-pane -p -t "=$sess:agent" 2>/dev/null)" || return 0
+
+    _classify_pane "$txt"
+}
+
+# Every listening TCP socket, tagged with the cwd of the process holding it.
+# Emits "<cwd>\t<port>". Two lsof calls total.
+#
+# Note: we deliberately do NOT walk the process tree down from #{pane_pid} --
+# dev servers (next-server, vite) reparent away from the pane's shell, so the
+# tree walk misses them. cwd is what actually survives.
+_ports_map() {
+    local l pid addr uniq
+    local pids=() ports=() cpid=() cwds=()
+
+    while IFS= read -r l; do
+        case "$l" in
+            p*) pid="${l#p}" ;;
+            n*) addr="${l#n}"
+                case "$addr" in
+                    *:[0-9]*) pids+=("$pid"); ports+=("${addr##*:}") ;;
+                esac ;;
+        esac
+    done < <(lsof -nP -iTCP -sTCP:LISTEN -Fpn 2>/dev/null)
+
+    (( ${#pids[@]} )) || return 0
+
+    uniq="$(printf '%s\n' "${pids[@]}" | sort -u | paste -sd, -)"
+    while IFS= read -r l; do
+        case "$l" in
+            p*) pid="${l#p}" ;;
+            n*) cpid+=("$pid"); cwds+=("${l#n}") ;;
+        esac
+    done < <(lsof -a -d cwd -p "$uniq" -Fpn 2>/dev/null)
+
+    local i j
+    for (( i = 0; i < ${#pids[@]}; i++ )); do
+        for (( j = 0; j < ${#cpid[@]}; j++ )); do
+            if [[ "${pids[$i]}" == "${cpid[$j]}" ]]; then
+                printf '%s\t%s\n' "${cwds[$j]}" "${ports[$i]}"
+                break
+            fi
+        done
+    done
+}
+
+# Builds the whole screen into $FRAME and the row->session map into $ROW_SESS.
+# Not a subshell, because the attach keybinding needs $ROW_SESS to survive.
+_status_frame() {
+    local wide="$1"
+    FRAME=""
+    ROW_SESS=()
+
+    local repo_name wt_base cols outw w_branch fixed
+    repo_name="$(get_repo_name)"
+    wt_base="$WORKTREE_DIR/$repo_name"
+    _term_cols_v cols
+    (( cols >= 40 )) || cols=40
+
+    # Fit rows inside the terminal: the "! 1 " prefix is 4 columns and each
+    # column gets one trailing space (the GIT trio shares one). Rows wider than
+    # the terminal would wrap and garble the in-place repaint, so when OUTPUT
+    # falls below its minimum, narrow BRANCH before giving up.
+    w_branch=$W_BRANCH
+    fixed=$(( 4 + w_branch + 1 + W_AGENT + 1 + W_INS + W_DEL + W_FILES + 1 + W_PORTS + W_TERM + 1 ))
+    outw=$(( cols - 1 - fixed ))
+    if (( outw < W_OUT_MIN )); then
+        w_branch=$(( w_branch - (W_OUT_MIN - outw) ))
+        (( w_branch >= 10 )) || w_branch=10
+        fixed=$(( 4 + w_branch + 1 + W_AGENT + 1 + W_INS + W_DEL + W_FILES + 1 + W_PORTS + W_TERM + 1 ))
+        outw=$(( cols - 1 - fixed ))
+        (( outw >= W_OUT_MIN )) || outw=$W_OUT_MIN
+    fi
+
+    # lsof dwarfs everything else in a frame (routinely 100s of ms on macOS),
+    # so the port map is cached and refreshed at most every PORTS_TTL seconds;
+    # the 'r' key clears the cache for an immediate re-scan.
+    if [[ -z "${PORTS_AT:-}" ]] || (( SECONDS - PORTS_AT >= PORTS_TTL )); then
+        PORTS_MAP="$(_ports_map || true)"
+        PORTS_AT=$SECONDS
+    fi
+
+    local pc=() pn=() cwd port
+    while IFS=$'\t' read -r cwd port; do
+        [[ -n "$cwd" && -n "$port" ]] || continue
+        pc+=("$cwd"); pn+=("$port")
+    done <<< "$PORTS_MAP"
+
+    local sn=() sa=() sname satt
+    while read -r sname satt; do
+        sn+=("$sname"); sa+=("$satt")
+    done < <(tmux list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null || true)
+
+    local n_wt=0 n_sess=0 n_input=0 rows="" idx=0
+    local wt_dir branch_name sess i
+    local c_branch c_agent c_ins c_del c_files c_ports c_att c_out
+
+    while IFS=$'\t' read -r wt_dir branch_name; do
+        n_wt=$(( n_wt + 1 ))
+        sess="$(_resolve_session "$repo_name" "$wt_dir" "$branch_name")"
+
+        # Session liveness and attached terminal count, both from the one
+        # list-sessions snapshot -- the single source of truth for this frame,
+        # so the STATE glyph and the TERM column can never contradict each other.
+        local att="—" alive=""
+        for (( i = 0; i < ${#sn[@]}; i++ )); do
+            if [[ "${sn[$i]}" == "$sess" ]]; then
+                alive=1
+                n_sess=$(( n_sess + 1 ))
+                if (( ${sa[$i]} > 0 )); then att="● ${sa[$i]}"; else att="○"; fi
+                break
+            fi
+        done
+
+        _agent_status "$sess" "$alive"
+        _git_stats "$wt_dir"
+
+        # ports whose cwd is this worktree or anywhere below it
+        local plist=""
+        for (( i = 0; i < ${#pc[@]}; i++ )); do
+            if [[ "${pc[$i]}" == "$wt_dir" || "${pc[$i]}" == "$wt_dir"/* ]]; then
+                case ",$plist," in
+                    *",${pn[$i]},"*) ;;
+                    *) plist="${plist:+$plist,}${pn[$i]}" ;;
+                esac
+            fi
+        done
+
+        local glyph agent_txt color
+        case "$A_STATE" in
+            input)   glyph="!"; agent_txt="needs input"; color="$YELLOW"; n_input=$(( n_input + 1 )) ;;
+            working) glyph="●"; agent_txt="working";     color="$GREEN" ;;
+            idle)    glyph="○"; agent_txt="idle";        color="$DIM" ;;
+            shell)   glyph="·"; agent_txt="no agent";    color="$DIM" ;;
+            *)       glyph=" "; agent_txt="no session";  color="$DIM" ;;
+        esac
+        [[ -n "$A_LINE" ]] || A_LINE="—"
+
+        idx=$(( idx + 1 ))
+        # Empty sentinel when there is no live session, so the 1-9 keybinding
+        # ignores the row instead of exec-ing tmux attach at a ghost.
+        if [[ "$A_STATE" == "nosession" ]]; then
+            ROW_SESS+=("")
+        else
+            ROW_SESS+=("$sess")
+        fi
+
+        local num="  "
+        (( idx <= 9 )) && num=" $idx"
+
+        _pad_v c_branch "$branch_name" "$w_branch"
+        _pad_v c_agent  "$agent_txt"   "$W_AGENT"
+        _pad_v c_ins    "+$G_INS"      "$W_INS"
+        _pad_v c_del    "-$G_DEL"      "$W_DEL"
+        _pad_v c_files  "${G_FILES}f"  "$W_FILES"
+        _pad_v c_ports  "${plist:-—}"  "$W_PORTS"
+        _pad_v c_att    "$att"         "$W_TERM"
+        _pad_v c_out    "$A_LINE"      "$outw"
+
+        rows+="${color}${glyph}${RESET}${DIM}${num}${RESET} "
+        rows+="${BOLD}${CYAN}${c_branch}${RESET} "
+        rows+="${color}${c_agent}${RESET} "
+        rows+="${GREEN}${c_ins}${RESET}${RED}${c_del}${RESET}${c_files} "
+        rows+="${BLUE}${c_ports}${RESET}${c_att} "
+        rows+="${DIM}${c_out}${RESET}"
+        rows+=$'\n'
+
+        [[ "$wide" == "true" ]] && rows+="   ${DIM}${wt_dir}${RESET}"$'\n'
+    done < <(_managed_worktrees "$wt_base")
+
+    local rule clock
+    _rule_v rule $(( cols - 1 ))
+
+    # Cached without the clock, so the live loop can repaint line 0 every second
+    # without rebuilding the (git + lsof + tmux) data behind it.
+    HDR_TEXT="muxtree ── ${repo_name} ── ${n_wt} worktrees · ${n_sess} sessions"
+    (( n_input > 0 )) && HDR_TEXT="$HDR_TEXT · ${n_input} need input"
+    # The header shares its line with "   HH:MM:SS" (11 columns); truncate so
+    # the once-per-second clock repaint can never wrap onto the rule line.
+    (( ${#HDR_TEXT} <= cols - 12 )) || HDR_TEXT="${HDR_TEXT:0:cols-13}…"
+
+    local h_b h_a h_g h_p h_t
+    _pad_v h_b "BRANCH" "$w_branch"
+    _pad_v h_a "AGENT"  "$W_AGENT"
+    _pad_v h_g "GIT"    $(( W_INS + W_DEL + W_FILES ))
+    _pad_v h_p "PORTS"  "$W_PORTS"
+    _pad_v h_t "TERM"   "$W_TERM"
+
+    clock="$(date +%H:%M:%S)"
+    FRAME+="${BOLD}${HDR_TEXT}${RESET}${DIM}   ${clock}${RESET}"$'\n'
+    FRAME+="${DIM}${rule}${RESET}"$'\n'
+    FRAME+="${DIM}    ${h_b} ${h_a} ${h_g} ${h_p}${h_t} OUTPUT${RESET}"$'\n'
+
+    if (( n_wt == 0 )); then
+        FRAME+=$'\n'"  No managed worktrees. Use ${BOLD}muxtree new <branch>${RESET} to create one."$'\n'
+    else
+        FRAME+="$rows"
+    fi
+
+    FRAME+="${DIM}${rule}${RESET}"$'\n'
+    FRAME+="${DIM} ${wt_base}${RESET}"$'\n'
+    _legend_lines "$cols"
+}
+
+# Explains the state glyph (column 1) and the TERM column. Appends to FRAME.
+# Single line when there is room, stacked when narrow, so it never wraps.
+_legend_lines() {
+    local cols="$1"
+
+    # Measure the plain text; the escapes in the rendered form are zero-width.
+    local state_plain="STATE: ! needs input  ● working  ○ idle  · no agent  ␣ no session"
+    local term_plain="TERM: ● n attached  ○ detached  — no session"
+
+    local state="${DIM}STATE:${RESET} ${YELLOW}!${RESET} needs input  ${GREEN}●${RESET} working  ${DIM}○ idle  · no agent  ␣ no session${RESET}"
+    local term="${DIM}TERM: ● n attached  ○ detached  — no session${RESET}"
+
+    if (( cols >= ${#state_plain} + ${#term_plain} + 4 )); then
+        FRAME+=" ${state}   ${term}"$'\n'
+    else
+        FRAME+=" ${state}"$'\n'
+        FRAME+=" ${term}"$'\n'
+    fi
+}
+
+_status_cleanup() {
+    printf '\033[?7h'   # re-enable autowrap
+    tput cnorm 2>/dev/null || true
+    tput rmcup 2>/dev/null || true
+}
+
+cmd_status() {
+    local interval="$STATUS_DEFAULT_INTERVAL" once=false wide=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --once|-1)     once=true; shift ;;
+            --wide|-l)     wide=true; shift ;;
+            --interval|-n)
+                # An explicit check: a bare `shift 2` on a missing value fails
+                # under set -e and would exit silently before the die below.
+                [[ $# -ge 2 ]] || die "$1 requires a value (seconds)"
+                interval="$2"; shift 2 ;;
+            -*)            die "Unknown option: $1" ;;
+            *)             die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ "$interval" =~ ^[0-9]+$ ]] && (( interval > 0 )) \
+        || die "--interval must be a positive integer (seconds)"
+
+    ensure_git_repo
+    load_config
+
+    command -v tmux >/dev/null 2>&1 || die "tmux is required for muxtree status"
+
+    # Non-interactive stdout (pipe, redirect) => single frame, no alt screen.
+    # Same when there is no controlling tty (cron, wrappers that close stdin):
+    # keys are read from /dev/tty -- stdin may be redirected, and a `read -t 1`
+    # on a closed stdin would return EOF instantly and busy-loop at 100% CPU.
+    [[ -t 1 ]] || once=true
+    { : </dev/tty; } 2>/dev/null || once=true
+
+    if $once; then
+        _status_frame "$wide"
+        printf '%s' "$FRAME"
+        return 0
+    fi
+
+    # EXIT restores the terminal on every path; INT/TERM must *exit* -- a trap
+    # that only cleaned up would leave the loop repainting over the normal
+    # screen after Ctrl-C, since a trapped signal does not stop the script.
+    trap '_status_cleanup' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    tput smcup 2>/dev/null || true
+    tput civis 2>/dev/null || true
+    # Autowrap off: an over-wide line (double-width CJK in agent output, a
+    # terminal narrower than the columns can shrink) truncates at the right
+    # edge instead of wrapping and shifting every row below it out of place.
+    printf '\033[?7l'
+
+    local sel="" key line clock last_clock="" last_build=0 due=1
+
+    # The clock ticks once a second; the table rebuilds every $interval. Keeping
+    # them separate means the seconds advance smoothly even at -n 5, and a slow
+    # rebuild never makes the clock stutter.
+    #
+    # bash 3.2 has no fractional `read -t`, so 1s is the finest poll available --
+    # which is exactly the clock's resolution anyway.
+    SECONDS=0
+    while true; do
+        if (( due )); then
+            _status_frame "$wide"
+            tput cup 0 0 2>/dev/null || true
+            while IFS= read -r line; do
+                printf '%s\033[K\n' "$line"
+            done <<< "${FRAME%$'\n'}"
+            printf '%s\033[K' "${DIM} q quit · r refresh · 1-9 attach${RESET}"
+            printf '\033[J'
+            last_clock="$(date +%H:%M:%S)"
+            last_build=$SECONDS
+            due=0
+        else
+            # Repaint line 0 only -- no git, no lsof, no tmux. bash 3.2 (stock
+            # macOS) has no printf '%()T', so the clock forks `date` -- once a
+            # second, which is noise next to the frame rebuilds it avoids.
+            clock="$(date +%H:%M:%S)"
+            if [[ "$clock" != "$last_clock" ]]; then
+                printf '\033[H%s%s%s%s   %s%s\033[K' \
+                    "$BOLD" "$HDR_TEXT" "$RESET" "$DIM" "$clock" "$RESET"
+                last_clock="$clock"
+            fi
+        fi
+
+        key=""
+        if read -rsn1 -t 1 key </dev/tty 2>/dev/null; then
+            case "$key" in
+                q|Q) break ;;
+                r|R) PORTS_AT=""; due=1 ;;
+                [1-9])
+                    if (( key <= ${#ROW_SESS[@]} )) \
+                       && [[ -n "${ROW_SESS[$(( key - 1 ))]}" ]]; then
+                        sel="${ROW_SESS[$(( key - 1 ))]}"
+                        break
+                    fi ;;
+            esac
+        fi
+
+        (( SECONDS - last_build >= interval )) && due=1
+    done
+
+    _status_cleanup
+    trap - EXIT INT TERM
+
+    if [[ -n "$sel" ]]; then
+        _attach_session "$sel"
     fi
 }
 
@@ -861,6 +1439,11 @@ ${BOLD}COMMANDS${RESET}
 
     ${CYAN}list${RESET}                              List worktrees, diff stats, session status
 
+    ${CYAN}status${RESET} [options]                  Live status pane (top-style), refreshes in place
+        --once, -1                    Print one frame and exit (also when piped)
+        --interval, -n <secs>         Refresh interval (default: 2)
+        --wide, -l                    Show the full worktree path under each row
+
     ${CYAN}delete${RESET} <branch> [--force]          Delete worktree and branch (with confirmation)
 
     ${CYAN}sessions${RESET} <action> <branch> [opts]  Manage tmux session for a worktree
@@ -883,6 +1466,8 @@ ${BOLD}EXAMPLES${RESET}
       --prompt "fix the login bug"        # Launch claude with a prompt
     muxtree new fix-bug --bg              # Create without opening terminals
     muxtree list                          # Show all worktrees + status
+    muxtree status                        # Live pane: agent state, ports, git
+    muxtree status --once                 # One frame (scriptable)
     muxtree sessions close feature-auth   # Kill tmux sessions
     muxtree sessions relaunch fix-bug     # Restart sessions
     muxtree delete feature-auth           # Remove worktree + branch
@@ -905,6 +1490,7 @@ main() {
         config)     cmd_config "$@" ;;
         new)        cmd_new "$@" ;;
         list|ls)    cmd_list "$@" ;;
+        status|top) cmd_status "$@" ;;
         delete|rm)  cmd_delete "$@" ;;
         sessions|s) cmd_sessions "$@" ;;
         help|-h|--help) cmd_help ;;
@@ -913,4 +1499,8 @@ main() {
     esac
 }
 
-main "$@"
+# Dispatch only when executed directly. When sourced (test.sh), the sourcing
+# script's own arguments must not be run as muxtree commands.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

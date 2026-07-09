@@ -54,6 +54,8 @@ _muxtree() {
         'new:Create worktree + tmux session'
         'list:List worktrees and session status'
         'ls:List worktrees and session status'
+        'status:Live status pane (agent state, ports, git)'
+        'top:Live status pane (agent state, ports, git)'
         'delete:Delete worktree and branch'
         'rm:Delete worktree and branch'
         'sessions:Manage tmux sessions'
@@ -91,11 +93,18 @@ _muxtree() {
                     ;;
                 config|list|ls|help|version)
                     ;;
+                status|top)
+                    _arguments \
+                        '(-1 --once)'{-1,--once}'[Print one frame and exit]' \
+                        '(-l --wide)'{-l,--wide}'[Show full worktree path per row]' \
+                        '(-n --interval)'{-n,--interval}'[Refresh interval in seconds]:seconds:'
+                    ;;
                 new)
                     _arguments \
                         '1:branch:' \
                         '--from[Base branch]:branch:($(_muxtree_git_branches))' \
                         '--run[Auto-run command in agent window]:command:(claude codex)' \
+                        '(-p --prompt)'{-p,--prompt}'[Prompt to pass to the agent (requires --run)]:prompt:' \
                         '--bg[Create session without opening terminal]'
                     ;;
                 delete|rm)
@@ -119,6 +128,7 @@ _muxtree() {
                                     _arguments \
                                         '1:branch:($(_muxtree_managed_branches))' \
                                         '--run[Auto-run command]:command:(claude codex)' \
+                                        '(-p --prompt)'{-p,--prompt}'[Prompt to pass to the agent (requires --run)]:prompt:' \
                                         '--bg[Create without opening terminal]'
                                     ;;
                                 close|kill|stop)
@@ -129,6 +139,7 @@ _muxtree() {
                                     _arguments \
                                         '1:branch:($(_muxtree_managed_branches))' \
                                         '--run[Auto-run command]:command:(claude codex)' \
+                                        '(-p --prompt)'{-p,--prompt}'[Prompt to pass to the agent (requires --run)]:prompt:' \
                                         '--bg[Create without opening terminal]'
                                     ;;
                                 attach)

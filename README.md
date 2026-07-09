@@ -103,6 +103,7 @@ That's it. You're working in an isolated branch with your `.env` and config file
   │  └─► ~/worktrees/my-app/fix-bug/  →  tmux: my-app_fix-bug
   │
   │  muxtree list         ← see all worktrees + diff stats + session status
+  │  muxtree status       ← live pane: which agents need input, ports, git
   │  muxtree delete fix-bug  ← kills session, removes worktree + branch
 ```
 
@@ -167,18 +168,107 @@ Shows all managed worktrees with diff stats and session status.
 Worktrees for my-app
 ════════════════════════════════════════════════════════════════
 
-  feature-auth  +42 -7
+  feature-auth  +42 -7 3f
   ~/worktrees/my-app/feature-auth
   Session: ● my-app_feature-auth
 
-  fix-bug  +3 -1
+  fix-bug  +3 -1 1f
   ~/worktrees/my-app/fix-bug
   Session: ○ my-app_fix-bug
 ```
 
 - `●` = tmux session is running
 - `○` = tmux session is not running
-- Diff stats show combined staged + unstaged changes vs HEAD
+- Diff stats show insertions/deletions vs HEAD (staged + unstaged) plus the
+  changed-file count (`Nf`, untracked files included)
+- Worktrees in detached-HEAD state (a commit checked out with no branch, e.g.
+  after an agent checks out a SHA) are listed as `(detached)` rather than
+  hidden — `muxtree status` shows them the same way
+
+### `muxtree status` (alias: `top`)
+
+A live, `top`-style pane across every managed worktree. Refreshes in place until
+you quit.
+
+```
+muxtree ── my-app ── 3 worktrees · 2 sessions · 1 need input   14:23:07
+─────────────────────────────────────────────────────────────────────────────
+    BRANCH                 AGENT        GIT              PORTS    TERM  OUTPUT
+! 1 feature-auth           needs input  +412  -88   7f   3000     ○     Do you want to create foo.txt?
+● 2 fix-bug                working      +12   -3    2f   3002     ● 1   ✢ Meandering… (4s · ↓ 65 tokens)
+  3 old-spike              no session   +55   -12   3f   —        —     —
+─────────────────────────────────────────────────────────────────────────────
+ ~/worktrees/my-app
+ STATE: ! needs input  ● working  ○ idle  · no agent  ␣ no session   TERM: ● n attached  ○ detached  — no session
+ q quit · r refresh · 1-9 attach
+```
+
+| Column | Meaning |
+| ------ | ------- |
+| *(glyph)* | The agent's state at a glance — see `STATE` legend below |
+| `BRANCH` | Branch checked out in that worktree |
+| `AGENT` | `needs input` (waiting on you) · `working` · `idle` · `no agent` · `no session` |
+| `GIT` | insertions, deletions, and changed-file count (untracked included) |
+| `PORTS` | TCP ports being listened on from inside the worktree |
+| `TERM` | How many terminals are attached to that worktree's tmux session |
+| `OUTPUT` | the agent's current status line, or its last line of output |
+
+The glyph in the first column mirrors `AGENT`:
+
+| Glyph | State |
+| ----- | ----- |
+| `!` | **needs input** — the agent is blocked on a permission or trust prompt |
+| `●` | **working** — actively running |
+| `○` | **idle** — finished, waiting at its prompt |
+| `·` | **no agent** — the session's `agent` window is a bare shell |
+| *(blank)* | **no session** — worktree exists, no tmux session |
+
+`TERM` tells you whether a session has a terminal open on it:
+
+| Value | Meaning |
+| ----- | ------- |
+| `● n` | Attached to `n` terminal windows |
+| `○` | Session is running, but no terminal is attached (e.g. created with `--bg`) |
+| `—` | No tmux session at all |
+
+Both legends are printed at the bottom of the live pane, so you never have to
+come back here.
+
+Press `1`–`9` to attach to that row's session (switches clients if you are
+already inside tmux).
+
+The clock in the header ticks every second regardless of `--interval`, so a slow
+refresh rate doesn't make the seconds hop. Only the header repaints on those
+in-between ticks — no git, tmux, or `lsof` work happens.
+
+Options:
+
+```
+--once, -1              Print a single frame and exit (also used when piped)
+--interval, -n <secs>   Refresh interval (default: 2)
+--wide, -l              Show the full worktree path beneath each row
+```
+
+**How agent state is detected.** muxtree reads the `agent` window's pane with
+`tmux capture-pane` and matches against Claude Code and Codex TUI markers
+(verified against Claude Code 2.1.x and codex-cli 0.144.0). Nothing is
+installed, no hooks are configured, and it works on sessions that are already
+running. The tradeoff is that these markers are UI strings: a redesign of an
+agent's status bar means updating the marker tables at the top of the
+status-pane section (`INPUT_MARKERS`, `WORKING_MARKERS`, `IDLE_MARKERS`,
+`CHROME_PATTERNS`) — one place, covered by `test.sh` fixtures for both agents.
+One caveat: while Codex is streaming a text response (no tool running) it shows
+no working indicator, so those moments read as `idle`.
+
+Ports are found by matching each listening socket's working directory against
+the worktree path — a process-tree walk from the tmux pane misses dev servers
+like `next-server`, which reparent away from the pane's shell. Because `lsof`
+is by far the most expensive call in a frame, the port map is cached for a few
+seconds; press `r` to force a fresh scan.
+
+On narrow terminals the `BRANCH` column shrinks to keep rows on one line, and
+autowrap is disabled while the pane runs, so anything still too wide truncates
+at the right edge instead of corrupting the display.
 
 ### `muxtree delete <branch> [--force]`
 
@@ -189,7 +279,7 @@ $ muxtree delete feature-auth
 
   Branch:    feature-auth
   Path:      ~/worktrees/my-app/feature-auth
-  Changes:   +42 -7
+  Changes:   +42 -7 (3 files)
 
 ⚠ This will remove the worktree and delete the local branch.
 Are you sure? (y/N) y
@@ -223,6 +313,13 @@ muxtree sessions attach feature-auth
 # Attach with a specific window selected
 muxtree sessions attach feature-auth agent
 ```
+
+`attach` works from inside tmux too — it switches your current client to the
+target session instead of failing on nested attach.
+
+All session lookups resolve by the worktree *directory* first, falling back to
+the branch name. So if a branch is renamed (or recreated) inside its worktree,
+`list`, `status`, `sessions`, and `delete` all still find the original session.
 
 ### `muxtree config`
 
