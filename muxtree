@@ -204,17 +204,15 @@ _managed_worktrees() {
 # Changed-file count and +/- for one worktree, in two git calls.
 # Sets G_FILES, G_INS, G_DEL. Untracked files count toward G_FILES (they are
 # real changes) but not toward +/-, which is what `git diff` can see.
+# -uall so an untracked directory counts as its files, not as one entry.
 # `git diff HEAD` already includes staged changes -- do not add --cached on top.
 _git_stats() {
     local wt="$1" l short parts i
     G_FILES=0; G_INS=0; G_DEL=0
 
     while IFS= read -r l; do
-        case "$l" in
-            '## '*|'') ;;
-            *) G_FILES=$(( G_FILES + 1 )) ;;
-        esac
-    done < <(git -C "$wt" status --porcelain=v1 --branch 2>/dev/null)
+        [[ -z "$l" ]] || G_FILES=$(( G_FILES + 1 ))
+    done < <(git -C "$wt" status --porcelain=v1 -uall 2>/dev/null)
 
     short="$(git -C "$wt" diff --shortstat HEAD 2>/dev/null || true)"
     [[ -n "$short" ]] || return 0
@@ -972,19 +970,22 @@ _pad_v() {
     printf -v "$1" '%s' "$out"
 }
 
-# Terminal width, into the variable named $1.
+# Terminal size: rows into the variable named $1, columns into $2.
 #
 # `tput cols` is wrong here: inside $( ) its stdout is a pipe, so it cannot
 # ioctl the tty and silently falls back to terminfo's 80. For the same reason
 # we must not gate this on [[ -t 1 ]] -- ask /dev/tty directly, and let the
-# open fail (cron, pipes with no controlling tty) select the fallback.
-_term_cols_v() {
-    local c=""
+# open fail (cron, pipes with no controlling tty) select the fallbacks.
+_term_size_v() {
+    local r="" c=""
     # The group's stderr is redirected because a failing `</dev/tty` open is
-    # reported by the shell, not by stty -- `stty 2>/dev/null` would not hide it.
-    c="$( { stty size </dev/tty; } 2>/dev/null | cut -d' ' -f2 || true)"
+    # reported by the shell, not by stty -- `stty 2>/dev/null` would not hide
+    # it. `|| true` keeps the empty-output read from tripping set -e.
+    read -r r c < <({ stty size </dev/tty; } 2>/dev/null) || true
+    [[ "$r" =~ ^[0-9]+$ ]] || r="${LINES:-40}"
     [[ "$c" =~ ^[0-9]+$ ]] || c="${COLUMNS:-100}"
-    printf -v "$1" '%s' "$c"
+    printf -v "$1" '%s' "$r"
+    printf -v "$2" '%s' "$c"
 }
 
 # A horizontal rule $2 columns wide, assigned to the variable named $1.
@@ -1126,16 +1127,35 @@ _ports_map() {
 
 # Builds the whole screen into $FRAME and the row->session map into $ROW_SESS.
 # Not a subshell, because the attach keybinding needs $ROW_SESS to survive.
+# $2 "true" clamps rows to the terminal height (the live repaint garbles if the
+# frame scrolls); --once leaves it off so piped output is never truncated.
 _status_frame() {
-    local wide="$1"
+    local wide="$1" clamp="${2:-false}"
     FRAME=""
     ROW_SESS=()
 
-    local repo_name wt_base cols outw w_branch fixed
+    local repo_name wt_base cols lines outw w_branch fixed
     repo_name="$(get_repo_name)"
     wt_base="$WORKTREE_DIR/$repo_name"
-    _term_cols_v cols
+    _term_size_v lines cols
     (( cols >= 40 )) || cols=40
+    (( lines >= 10 )) || lines=10
+
+    # Build the legend up front: the row clamp below needs to know whether it
+    # renders as one line or two at this width. FRAME is its only output
+    # channel, so borrow it and reset.
+    local legend legend_h=1
+    _legend_lines "$cols"
+    legend="$FRAME"
+    FRAME=""
+    [[ "${legend%$'\n'}" == *$'\n'* ]] && legend_h=2
+
+    # lsof reports physical cwds (macOS /tmp is a symlink to /private/tmp), so
+    # a worktree base behind a symlink would never match a socket's cwd.
+    # Resolve the base once per frame -- one fork -- and match rows both ways.
+    local wt_real_base=""
+    wt_real_base="$(CDPATH= cd -- "$wt_base" 2>/dev/null && pwd -P || true)"
+    [[ "$wt_real_base" != "$wt_base" ]] || wt_real_base=""
 
     # Fit rows inside the terminal: the "! 1 " prefix is 4 columns and each
     # column gets one trailing space (the GIT trio shares one). Rows wider than
@@ -1166,12 +1186,15 @@ _status_frame() {
         pc+=("$cwd"); pn+=("$port")
     done <<< "$PORTS_MAP"
 
+    # Tab-delimited: a foreign session named with spaces would shift its
+    # attached count into the name field on whitespace splitting. Session
+    # names cannot contain tabs.
     local sn=() sa=() sname satt
-    while read -r sname satt; do
+    while IFS=$'\t' read -r sname satt; do
         sn+=("$sname"); sa+=("$satt")
-    done < <(tmux list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null || true)
+    done < <(tmux list-sessions -F $'#{session_name}\t#{session_attached}' 2>/dev/null || true)
 
-    local n_wt=0 n_sess=0 n_input=0 rows="" idx=0
+    local n_wt=0 n_sess=0 n_input=0 rows="" rowbuf=() idx=0
     local wt_dir branch_name sess i
     local c_branch c_agent c_ins c_del c_files c_ports c_att c_out
 
@@ -1195,10 +1218,13 @@ _status_frame() {
         _agent_status "$sess" "$alive"
         _git_stats "$wt_dir"
 
-        # ports whose cwd is this worktree or anywhere below it
-        local plist=""
+        # ports whose cwd is this worktree or anywhere below it, matched
+        # against the literal path and its physical twin under a symlinked base
+        local plist="" wt_real=""
+        [[ -n "$wt_real_base" ]] && wt_real="$wt_real_base/${wt_dir#"$wt_base"/}"
         for (( i = 0; i < ${#pc[@]}; i++ )); do
-            if [[ "${pc[$i]}" == "$wt_dir" || "${pc[$i]}" == "$wt_dir"/* ]]; then
+            if [[ "${pc[$i]}" == "$wt_dir" || "${pc[$i]}" == "$wt_dir"/* || \
+                  ( -n "$wt_real" && ( "${pc[$i]}" == "$wt_real" || "${pc[$i]}" == "$wt_real"/* ) ) ]]; then
                 case ",$plist," in
                     *",${pn[$i]},"*) ;;
                     *) plist="${plist:+$plist,}${pn[$i]}" ;;
@@ -1237,16 +1263,38 @@ _status_frame() {
         _pad_v c_att    "$att"         "$W_TERM"
         _pad_v c_out    "$A_LINE"      "$outw"
 
-        rows+="${color}${glyph}${RESET}${DIM}${num}${RESET} "
-        rows+="${BOLD}${CYAN}${c_branch}${RESET} "
-        rows+="${color}${c_agent}${RESET} "
-        rows+="${GREEN}${c_ins}${RESET}${RED}${c_del}${RESET}${c_files} "
-        rows+="${BLUE}${c_ports}${RESET}${c_att} "
-        rows+="${DIM}${c_out}${RESET}"
-        rows+=$'\n'
+        local row=""
+        row+="${color}${glyph}${RESET}${DIM}${num}${RESET} "
+        row+="${BOLD}${CYAN}${c_branch}${RESET} "
+        row+="${color}${c_agent}${RESET} "
+        row+="${GREEN}${c_ins}${RESET}${RED}${c_del}${RESET}${c_files} "
+        row+="${BLUE}${c_ports}${RESET}${c_att} "
+        row+="${DIM}${c_out}${RESET}"
+        row+=$'\n'
 
-        [[ "$wide" == "true" ]] && rows+="   ${DIM}${wt_dir}${RESET}"$'\n'
+        [[ "$wide" == "true" ]] && row+="   ${DIM}${wt_dir}${RESET}"$'\n'
+        rowbuf+=("$row")
     done < <(_managed_worktrees "$wt_base")
+
+    # Clamp rows to the terminal height: the fixed chrome is 6 lines (header,
+    # two rules, column header, base path, key bar) plus the legend; anything
+    # past that would scroll the screen and garble the cup-0-0 repaint. Every
+    # row above was still *computed*, so the header counts stay accurate.
+    local per_row=1 visible=$n_wt
+    [[ "$wide" == "true" ]] && per_row=2
+    if [[ "$clamp" == "true" ]]; then
+        local data_lines=$(( lines - 6 - legend_h ))
+        if (( n_wt * per_row > data_lines )); then
+            # Reserve one line for the "… N more" indicator.
+            visible=$(( (data_lines - 1) / per_row ))
+            (( visible >= 1 )) || visible=1
+        fi
+    fi
+    for (( i = 0; i < visible; i++ )); do
+        rows+="${rowbuf[$i]}"
+    done
+    (( visible >= n_wt )) || \
+        rows+=" ${DIM}… $(( n_wt - visible )) more — enlarge the terminal to see all${RESET}"$'\n'
 
     local rule clock
     _rule_v rule $(( cols - 1 ))
@@ -1279,7 +1327,7 @@ _status_frame() {
 
     FRAME+="${DIM}${rule}${RESET}"$'\n'
     FRAME+="${DIM} ${wt_base}${RESET}"$'\n'
-    _legend_lines "$cols"
+    FRAME+="$legend"
 }
 
 # Explains the state glyph (column 1) and the TERM column. Appends to FRAME.
@@ -1359,7 +1407,7 @@ cmd_status() {
     # edge instead of wrapping and shifting every row below it out of place.
     printf '\033[?7l'
 
-    local sel="" key line clock last_clock="" last_build=0 due=1
+    local sel="" key line clock last_clock="" last_build=0 due=1 misses=0
 
     # The clock ticks once a second; the table rebuilds every $interval. Keeping
     # them separate means the seconds advance smoothly even at -n 5, and a slow
@@ -1370,7 +1418,7 @@ cmd_status() {
     SECONDS=0
     while true; do
         if (( due )); then
-            _status_frame "$wide"
+            _status_frame "$wide" true
             tput cup 0 0 2>/dev/null || true
             while IFS= read -r line; do
                 printf '%s\033[K\n' "$line"
@@ -1394,6 +1442,7 @@ cmd_status() {
 
         key=""
         if read -rsn1 -t 1 key </dev/tty 2>/dev/null; then
+            misses=0
             case "$key" in
                 q|Q) break ;;
                 r|R) PORTS_AT=""; due=1 ;;
@@ -1404,6 +1453,16 @@ cmd_status() {
                         break
                     fi ;;
             esac
+        elif (( $? > 128 )); then
+            # >128 is the 1s timeout expiring -- the normal idle path.
+            misses=0
+        else
+            # <=128 means /dev/tty itself failed. The startup check caught a
+            # missing tty; this catches one that disappears mid-run, where each
+            # failed read returns instantly and the loop would otherwise spin
+            # at 100% CPU -- the busy-loop the /dev/tty switch exists to fix.
+            misses=$(( misses + 1 ))
+            (( misses < 10 )) || break
         fi
 
         (( SECONDS - last_build >= interval )) && due=1

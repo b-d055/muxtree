@@ -268,7 +268,9 @@ seconds; press `r` to force a fresh scan.
 
 On narrow terminals the `BRANCH` column shrinks to keep rows on one line, and
 autowrap is disabled while the pane runs, so anything still too wide truncates
-at the right edge instead of corrupting the display.
+at the right edge instead of corrupting the display. On short terminals, rows
+that would overflow the height collapse into an `… N more` line (the header
+counts still cover every worktree); `--once` output is never clamped.
 
 ### `muxtree delete <branch> [--force]`
 

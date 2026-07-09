@@ -30,6 +30,17 @@
   causes a 100% CPU busy-loop with dead keybindings.
 - `status`: pressing a digit on a row with no session is ignored instead of
   exiting with a tmux error.
+- `status`: rows are clamped to the terminal height (an `… N more` line
+  replaces the overflow) instead of scrolling and garbling the in-place
+  repaint; `--once` output is never clamped.
+- `status`: ports are now found when `worktree_dir` sits behind a symlink
+  (e.g. `/tmp` → `/private/tmp` on macOS) — `lsof` reports physical paths.
+- `status`: a foreign tmux session with spaces in its name can no longer
+  garble the per-frame session snapshot (tab-delimited now).
+- `status`: a `/dev/tty` that disappears mid-run exits the pane instead of
+  busy-looping at 100% CPU.
+- Changed-file counts use `git status -uall`, so an untracked directory
+  counts each file inside it instead of appearing as one entry.
 - `status -n` / `--interval` with a missing value dies with a usage message
   instead of exiting silently.
 - tmux session matching is exact (`=name`): a session named as a prefix of
