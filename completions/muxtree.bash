@@ -48,7 +48,7 @@ _muxtree() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="init config new list ls delete rm sessions s help version"
+    local commands="init config new list ls status top delete rm sessions s help version"
     local session_actions="open launch start close kill stop relaunch restart attach"
 
     # Top-level command completion
@@ -66,6 +66,16 @@ _muxtree() {
         config|list|ls|help|version)
             # No further completions
             ;;
+        status|top)
+            case "$prev" in
+                --interval|-n)
+                    # Expects a number; nothing sensible to suggest
+                    ;;
+                *)
+                    COMPREPLY=($(compgen -W "--once -1 --wide -l --interval -n" -- "$cur"))
+                    ;;
+            esac
+            ;;
         new)
             case "$prev" in
                 --from)
@@ -76,9 +86,12 @@ _muxtree() {
                 --run)
                     COMPREPLY=($(compgen -W "claude codex" -- "$cur"))
                     ;;
+                --prompt|-p)
+                    # Free text; nothing sensible to suggest
+                    ;;
                 *)
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=($(compgen -W "--from --run --bg" -- "$cur"))
+                        COMPREPLY=($(compgen -W "--from --run --prompt -p --bg" -- "$cur"))
                     fi
                     ;;
             esac
@@ -117,9 +130,12 @@ _muxtree() {
                         --run)
                             COMPREPLY=($(compgen -W "claude codex" -- "$cur"))
                             ;;
+                        --prompt|-p)
+                            # Free text; nothing sensible to suggest
+                            ;;
                         *)
                             if [[ "$cur" == -* ]]; then
-                                COMPREPLY=($(compgen -W "--run --bg" -- "$cur"))
+                                COMPREPLY=($(compgen -W "--run --prompt -p --bg" -- "$cur"))
                             fi
                             ;;
                     esac
