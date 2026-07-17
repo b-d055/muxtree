@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0 — 2026-07-16
+
+### Added
+- `new --checkout` (`-c`): adopt an existing branch in a worktree instead of
+  creating a new one. Resolves a local branch first, then a remote (preferring
+  `origin`, fetching once if the branch isn't present yet), and sets up remote
+  tracking so commits push back to the real branch — e.g. reviewing a PR or
+  contributing to someone else's branch. Mutually exclusive with `--from`.
+  Shell completions (bash, zsh) and help text updated.
+
 ## 1.1.0 — 2026-07-09
 
 ### Added

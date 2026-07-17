@@ -508,6 +508,39 @@ assert_eq "clean worktree files" "0" "$G_FILES"
 assert_eq "clean worktree +"     "0" "$G_INS"
 assert_eq "clean worktree -"     "0" "$G_DEL"
 
+# ── 14. _resolve_remote_branch (new --checkout core) ─────────────────────────
+
+echo ""
+echo "== _resolve_remote_branch =="
+
+RR_REMOTE="$TMPDIR_TEST/rr-remote.git"
+RR_FORK="$TMPDIR_TEST/rr-fork.git"
+RR_APP="$TMPDIR_TEST/rr-app"
+_rr_commit() {
+    git -C "$1" -c user.email=test@test -c user.name=test \
+        -c commit.gpgsign=false commit -q "${@:2}"
+}
+git -C "$TMPDIR_TEST" init -q --bare rr-remote.git
+git -C "$TMPDIR_TEST" init -q --bare rr-fork.git
+git -C "$TMPDIR_TEST" clone -q rr-remote.git rr-seed 2>/dev/null
+_rr_commit "$TMPDIR_TEST/rr-seed" --allow-empty -m init
+git -C "$TMPDIR_TEST/rr-seed" push -q origin HEAD:main 2>/dev/null
+git -C "$TMPDIR_TEST/rr-seed" push -q origin HEAD:refs/heads/feature/slashes 2>/dev/null
+# fork-only branch, to prove non-origin remotes are searched
+git -C "$TMPDIR_TEST/rr-seed" push -q "$RR_FORK" HEAD:refs/heads/fork-branch 2>/dev/null
+
+git -C "$TMPDIR_TEST" clone -q rr-remote.git rr-app 2>/dev/null
+git -C "$RR_APP" remote add fork "$RR_FORK" 2>/dev/null
+git -C "$RR_APP" fetch -q --all 2>/dev/null
+
+# helper that runs _resolve_remote_branch from inside the app repo
+_rr() { ( cd "$RR_APP" && _resolve_remote_branch "$1" __rr && printf '%s' "$__rr" ); }
+
+assert_eq "resolves origin branch"        "refs/remotes/origin/main"            "$(_rr main)"
+assert_eq "branch name with slashes"      "refs/remotes/origin/feature/slashes" "$(_rr feature/slashes)"
+assert_eq "falls back to a non-origin remote" "refs/remotes/fork/fork-branch"   "$(_rr fork-branch)"
+assert_eq "unknown branch resolves empty" ""                                    "$(_rr nope-not-here)"
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 echo ""

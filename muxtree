@@ -6,7 +6,7 @@ set -euo pipefail
 # Create and manage git worktrees + tmux sessions for AI coding agents
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 CONFIG_DIR="${MUXTREE_CONFIG_DIR:-$HOME/.muxtree}"
 CONFIG_FILE="$CONFIG_DIR/config"
 
@@ -137,6 +137,26 @@ get_main_branch() {
         done
     fi
     echo "${main_ref:-main}"
+}
+
+# Resolve <branch> to a remote-tracking ref for `new --checkout`. Prefers
+# origin; otherwise the first remote that has the branch. Sets the variable
+# named by $2 to a full refs/remotes/<remote>/<branch> ref, or "" if none.
+# Uses show-ref per remote (not a glob) so branch names with slashes work.
+_resolve_remote_branch() {
+    local branch="$1" _outvar="$2" r result=""
+    if git show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
+        result="refs/remotes/origin/$branch"
+    else
+        while IFS= read -r r; do
+            [[ -n "$r" ]] || continue
+            if git show-ref --verify --quiet "refs/remotes/$r/$branch" 2>/dev/null; then
+                result="refs/remotes/$r/$branch"
+                break
+            fi
+        done < <(git remote)
+    fi
+    printf -v "$_outvar" '%s' "$result"
 }
 
 worktree_path() {
@@ -402,19 +422,26 @@ cmd_new() {
     local run_cmd=""
     local prompt=""
     local bg=false
+    local checkout=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --from)      base_branch="$2"; shift 2 ;;
-            --run)       run_cmd="$2"; shift 2 ;;
-            --prompt|-p) prompt="$2"; shift 2 ;;
-            --bg)        bg=true; shift ;;
-            -*)          die "Unknown option: $1" ;;
-            *)           branch="$1"; shift ;;
+            --from)          base_branch="$2"; shift 2 ;;
+            --checkout|-c)   checkout=true; shift ;;
+            --run)           run_cmd="$2"; shift 2 ;;
+            --prompt|-p)     prompt="$2"; shift 2 ;;
+            --bg)            bg=true; shift ;;
+            -*)              die "Unknown option: $1" ;;
+            *)               branch="$1"; shift ;;
         esac
     done
 
-    [[ -n "$branch" ]] || die "Usage: muxtree new <branch-name> [--from <base-branch>] [--run claude|codex] [--prompt \"...\"] [--bg]"
+    [[ -n "$branch" ]] || die "Usage: muxtree new <branch-name> [--from <base-branch>] [--checkout] [--run claude|codex] [--prompt \"...\"] [--bg]"
+
+    # --checkout adopts an existing branch; --from picks a base for a new one.
+    if [[ "$checkout" == "true" && -n "$base_branch" ]]; then
+        die "--checkout and --from are mutually exclusive: --checkout adopts an existing branch, --from creates a new one from a base."
+    fi
 
     # Validate --run command if provided
     if [[ -n "$run_cmd" ]]; then
@@ -440,29 +467,54 @@ cmd_new() {
     local repo_root repo_name wt_path
     repo_root="$(get_repo_root)"
     repo_name="$(get_repo_name)"
-    base_branch="${base_branch:-$(get_main_branch)}"
     wt_path="$(worktree_path "$repo_name" "$branch")"
-
-    # Validate base branch exists
-    if ! git show-ref --verify --quiet "refs/heads/$base_branch" 2>/dev/null && \
-       ! git show-ref --verify --quiet "refs/remotes/origin/$base_branch" 2>/dev/null; then
-        die "Base branch '$base_branch' does not exist."
-    fi
-
-    # Check if branch already exists
-    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
-        die "Branch '$branch' already exists. Use a different name, or delete it first."
-    fi
 
     if [[ -d "$wt_path" ]]; then
         die "Worktree already exists at $wt_path"
     fi
 
-    # 1. Create worktree with new branch
-    info "Creating worktree at ${CYAN}$wt_path${RESET}"
     mkdir -p "$(dirname "$wt_path")"
-    git worktree add -b "$branch" "$wt_path" "$base_branch"
-    success "Worktree created (branch ${CYAN}$branch${RESET} from ${DIM}$base_branch${RESET})"
+
+    if [[ "$checkout" == "true" ]]; then
+        # 1. Check out an existing branch (local first, then a remote) so commits
+        #    push back to the real branch -- e.g. reviewing/contributing to a PR.
+        local remote_ref=""
+        if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+            info "Creating worktree at ${CYAN}$wt_path${RESET}"
+            git worktree add "$wt_path" "$branch"
+            success "Worktree created (checked out existing branch ${CYAN}$branch${RESET})"
+        else
+            _resolve_remote_branch "$branch" remote_ref
+            if [[ -z "$remote_ref" ]]; then
+                info "Branch not found locally; fetching from remotes..."
+                git fetch --all --quiet 2>/dev/null || true
+                _resolve_remote_branch "$branch" remote_ref
+            fi
+            [[ -n "$remote_ref" ]] || \
+                die "Branch '$branch' not found locally or on any remote. Run 'git fetch' or check the name."
+            info "Creating worktree at ${CYAN}$wt_path${RESET}"
+            git worktree add --track -b "$branch" "$wt_path" "$remote_ref"
+            success "Worktree created (tracking ${DIM}${remote_ref#refs/remotes/}${RESET} as ${CYAN}$branch${RESET})"
+        fi
+    else
+        base_branch="${base_branch:-$(get_main_branch)}"
+
+        # Validate base branch exists
+        if ! git show-ref --verify --quiet "refs/heads/$base_branch" 2>/dev/null && \
+           ! git show-ref --verify --quiet "refs/remotes/origin/$base_branch" 2>/dev/null; then
+            die "Base branch '$base_branch' does not exist."
+        fi
+
+        # Check if branch already exists
+        if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+            die "Branch '$branch' already exists. Use --checkout to adopt it, a different name, or delete it first."
+        fi
+
+        # 1. Create worktree with new branch
+        info "Creating worktree at ${CYAN}$wt_path${RESET}"
+        git worktree add -b "$branch" "$wt_path" "$base_branch"
+        success "Worktree created (branch ${CYAN}$branch${RESET} from ${DIM}$base_branch${RESET})"
+    fi
 
     # 2. Copy config files
     if [[ -n "$COPY_FILES" ]]; then
@@ -1492,6 +1544,8 @@ ${BOLD}COMMANDS${RESET}
 
     ${CYAN}new${RESET} <branch> [options]             Create worktree + tmux session
         --from <branch>               Base branch (default: main/master)
+        --checkout, -c                Adopt an existing local/remote branch
+                                      (tracks it; push goes to the real branch)
         --run <claude|codex>          Auto-run command in agent window
         --prompt|-p <text>            Prompt to pass to the agent (requires --run)
         --bg                          Create session without opening terminal
@@ -1520,6 +1574,7 @@ ${BOLD}EXAMPLES${RESET}
     muxtree init --local                  # Project-specific copy_files
     muxtree new feature-auth              # New worktree from main
     muxtree new fix-bug --from develop    # New worktree from develop
+    muxtree new pr-branch --checkout      # Adopt an existing branch (PR review)
     muxtree new feature-ai --run claude   # Auto-launch claude code
     muxtree new fix-bug --run claude \\
       --prompt "fix the login bug"        # Launch claude with a prompt

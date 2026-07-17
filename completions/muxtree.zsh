@@ -103,6 +103,7 @@ _muxtree() {
                     _arguments \
                         '1:branch:' \
                         '--from[Base branch]:branch:($(_muxtree_git_branches))' \
+                        '(-c --checkout)'{-c,--checkout}'[Adopt an existing local/remote branch]' \
                         '--run[Auto-run command in agent window]:command:(claude codex)' \
                         '(-p --prompt)'{-p,--prompt}'[Prompt to pass to the agent (requires --run)]:prompt:' \
                         '--bg[Create session without opening terminal]'

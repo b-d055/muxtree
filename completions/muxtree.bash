@@ -91,7 +91,7 @@ _muxtree() {
                     ;;
                 *)
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=($(compgen -W "--from --run --prompt -p --bg" -- "$cur"))
+                        COMPREPLY=($(compgen -W "--from --checkout -c --run --prompt -p --bg" -- "$cur"))
                     fi
                     ;;
             esac
