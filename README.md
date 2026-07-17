@@ -142,6 +142,11 @@ muxtree new feature-auth
 # Branch from a specific base
 muxtree new fix-bug --from develop
 
+# Adopt an existing branch instead of creating a new one — checks it out and
+# tracks it, so commits push back to the real branch (e.g. reviewing a PR).
+# Resolves a local branch first, then a remote (fetching if needed).
+muxtree new pr-branch --checkout
+
 # Auto-launch Claude Code in the claude session
 muxtree new feature-ai --run claude
 
@@ -154,7 +159,9 @@ muxtree new fix-bug --bg
 
 **What happens:**
 
-1. `git worktree add -b <branch>` at `<worktree_dir>/<repo>/<branch>/`
+1. `git worktree add -b <branch>` at `<worktree_dir>/<repo>/<branch>/` — or, with
+   `--checkout`, checks out the existing branch there (setting up remote tracking
+   when it came from a remote). `--checkout` and `--from` are mutually exclusive.
 2. Copies each file from `copy_files` config into the new worktree
 3. Creates a detached tmux session with two windows (dev + agent)
 4. Runs `setup_commands` in the dev window (chained with `&&`)
