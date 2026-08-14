@@ -1,3 +1,5 @@
+
+
 ```
                        _
   _ __ ___  _   ___  _| |_ _ __ ___  ___
@@ -152,6 +154,9 @@ muxtree new feature-ai --run claude
 
 # Auto-launch Codex instead
 muxtree new feature-ai --run codex
+
+# Pass an initial prompt to the agent
+muxtree new feature-ai --run claude --prompt "Refactor auth logic"
 
 # Create worktree + session without opening a terminal window
 muxtree new fix-bug --bg
@@ -507,3 +512,4 @@ rm -rf ~/worktrees  # or wherever you configured them
 ## License
 
 MIT
+```
